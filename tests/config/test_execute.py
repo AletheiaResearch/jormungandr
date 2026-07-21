@@ -325,118 +325,151 @@ class TestOverrides:
             PromptRecord(id="w", prompt="x", overrides={"model": "other/model"})
 
 
-class TestGitWorkspaces:
-    """Exercised against real local git repositories — no network needed."""
+class TestGitWorkspacesBecomeAnImage:
+    """A repository is a third image tier, not a host-side clone.
 
-    @pytest.fixture
-    @staticmethod
-    def repo(tmp_path_factory) -> Path:
-        import subprocess
+    This is SWE-bench's *instance* tier and exists for the same reason: the
+    checkout is the most expensive per-record step and the one most worth
+    caching. A retried run reuses the image; two records on the same commit
+    share one.
+    """
 
-        root = tmp_path_factory.mktemp("repo")
-        (root / "README.md").write_text("root readme\n")
-        pkg = root / "services" / "api"
-        pkg.mkdir(parents=True)
-        (pkg / "main.py").write_text("print('api')\n")
-        run = lambda *a: subprocess.run(  # noqa: E731
-            a, cwd=root, check=True, capture_output=True
-        )
-        run("git", "init", "--quiet", "-b", "main")
-        run("git", "config", "user.email", "t@example.com")
-        run("git", "config", "user.name", "T")
-        run("git", "add", "-A")
-        run("git", "commit", "--quiet", "-m", "first")
-        run("git", "tag", "v1.0.0")
-        (root / "README.md").write_text("changed after the tag\n")
-        run("git", "add", "-A")
-        run("git", "commit", "--quiet", "-m", "second")
-        return root
+    def compose_for(self, **git):
+        from jormungandr.execute import resolve_commit  # noqa: F401
+        from jormungandr.runtime.compose import compose_workspace
 
-    def execute_with(self, project: Path, git: dict):
-        return execute(
-            load(project),
-            records=[PromptRecord(prompt="x", id="w", git=git)],
-            builder=FakeBuilder(),
-            runner=FakeRunner(),
-            available_env=ENV,
+        return compose_workspace(
+            parent="demo:runtime-abc",
+            repository="demo",
+            clone_url=git.get("clone_url", "https://github.com/a/b"),
+            commit="d" * 40,
+            platform="linux/arm64",
+            workdir=git.get("workdir", "/workspace"),
+            user=git.get("user", "agent"),
+            subdirectory=git.get("subdirectory"),
+            clone_as=git.get("clone_as"),
         )
 
-    def test_whole_repo_lands_at_the_workspace_root(self, project, repo) -> None:
-        report = self.execute_with(project, {"clone_url": str(repo)})
-        workspace = report.results[0].directory / "workspace"
-        assert (workspace / "README.md").exists()
-        # A full clone keeps its history, so the agent can diff and commit.
-        assert (workspace / ".git").is_dir()
+    def test_it_builds_on_the_runtime_image(self) -> None:
+        layer = self.compose_for()
+        assert layer.tier == "workspace"
+        assert layer.parent == "demo:runtime-abc"
+        assert "FROM demo:runtime-abc" in layer.dockerfile
 
-    def test_ref_is_checked_out(self, project, repo) -> None:
-        report = self.execute_with(project, {"clone_url": str(repo), "ref": "v1.0.0"})
-        readme = report.results[0].directory / "workspace" / "README.md"
-        assert readme.read_text() == "root readme\n"
+    def test_the_commit_is_fetched_not_the_branch(self) -> None:
+        # A digest is only honest about fixed content; caching a branch name
+        # would serve yesterday's code from today's tag.
+        layer = self.compose_for()
+        assert f"fetch --quiet --depth 1 origin {'d' * 40}" in layer.dockerfile
 
-    def test_default_branch_without_a_ref(self, project, repo) -> None:
-        report = self.execute_with(project, {"clone_url": str(repo)})
-        readme = report.results[0].directory / "workspace" / "README.md"
-        assert readme.read_text() == "changed after the tag\n"
+    def test_the_same_commit_yields_the_same_image(self) -> None:
+        assert self.compose_for().digest == self.compose_for().digest
 
-    def test_subdirectory_becomes_the_workspace(self, project, repo) -> None:
-        report = self.execute_with(
-            project, {"clone_url": str(repo), "subdirectory": "services/api"}
+    def test_a_different_commit_yields_a_different_image(self) -> None:
+        from jormungandr.runtime.compose import compose_workspace
+
+        other = compose_workspace(
+            parent="demo:runtime-abc", repository="demo",
+            clone_url="https://github.com/a/b", commit="e" * 40,
+            platform="linux/arm64", workdir="/workspace", user="agent",
         )
-        workspace = report.results[0].directory / "workspace"
-        assert (workspace / "main.py").exists()
-        assert not (workspace / "README.md").exists()
-        # A subtree is not a repository; no history comes with it.
-        assert not (workspace / ".git").exists()
+        assert other.digest != self.compose_for().digest
 
-    def test_clone_as_nests_the_content(self, project, repo) -> None:
-        report = self.execute_with(project, {"clone_url": str(repo), "clone_as": "app"})
-        workspace = report.results[0].directory / "workspace"
-        assert (workspace / "app" / "README.md").exists()
-        assert not (workspace / "README.md").exists()
+    def test_a_different_runtime_parent_yields_a_different_image(self) -> None:
+        from jormungandr.runtime.compose import compose_workspace
 
-    def test_subdirectory_and_clone_as_together(self, project, repo) -> None:
-        report = self.execute_with(
-            project,
-            {"clone_url": str(repo), "ref": "v1.0.0",
-             "subdirectory": "services/api", "clone_as": "api"},
+        other = compose_workspace(
+            parent="demo:runtime-CHANGED", repository="demo",
+            clone_url="https://github.com/a/b", commit="d" * 40,
+            platform="linux/arm64", workdir="/workspace", user="agent",
         )
-        workspace = report.results[0].directory / "workspace"
-        assert (workspace / "api" / "main.py").exists()
+        assert other.digest != self.compose_for().digest
 
-    def test_missing_subdirectory_fails_that_record_clearly(self, project, repo) -> None:
-        report = self.execute_with(
-            project, {"clone_url": str(repo), "subdirectory": "does/not/exist"}
-        )
-        assert not report.ok
-        assert "does/not/exist" in (report.results[0].error or "")
+    def test_subdirectory_selects_the_content(self) -> None:
+        layer = self.compose_for(subdirectory="services/api")
+        assert "/tmp/jormungandr-clone/services/api/. /workspace/" in layer.dockerfile
 
-    def test_bad_ref_fails_that_record(self, project, repo) -> None:
-        report = self.execute_with(project, {"clone_url": str(repo), "ref": "nope"})
-        assert not report.ok
-        assert "could not clone" in (report.results[0].error or "")
+    def test_clone_as_nests_the_content(self) -> None:
+        layer = self.compose_for(clone_as="app")
+        assert "/workspace/app/" in layer.dockerfile
 
-    def test_staging_directory_is_cleaned_up(self, project, repo) -> None:
-        report = self.execute_with(
-            project, {"clone_url": str(repo), "subdirectory": "services/api"}
-        )
-        assert not (report.results[0].directory / ".clone").exists()
+    def test_it_ends_as_the_unprivileged_user(self) -> None:
+        layer = self.compose_for(user="runner")
+        lines = [l for l in layer.dockerfile.splitlines() if l.startswith("USER")]
+        assert lines[0] == "USER root"   # cloning and chown need it
+        assert lines[-1] == "USER runner"
 
-    def test_github_repo_shorthand_reaches_the_same_path(self, project, repo) -> None:
-        # github_repo desugars to a GitSource, so it walks the same code.
-        record = PromptRecord(prompt="x", id="gh", github_repo="acme/app")
-        assert record.workspace.git.clone_url == "https://github.com/acme/app"
+    def test_git_is_installed_if_absent(self) -> None:
+        # The package manager differs by distribution, same as useradd.
+        layer = self.compose_for()
+        assert "apt-get install" in layer.dockerfile
+        assert "apk add" in layer.dockerfile
 
-    def test_workspace_is_copied_in_not_mounted(self, project, repo) -> None:
+    def test_no_host_clone_happens(self, project: Path) -> None:
+        # The record's directory must gain no workspace copy: the checkout
+        # lives in the image.
+        runner = FakeRunner()
+
+        class RecordingBuilder(FakeBuilder):
+            def __init__(self):
+                super().__init__()
+                self.layers = []
+
+            def build_layer(self, layer, *, platform, **kwargs):
+                self.layers.append(layer)
+                return type(
+                    "R", (), {"reference": f"demo:{layer.tier}-{layer.digest}"}
+                )()
+
+        builder = RecordingBuilder()
+        import jormungandr.execute as ex
+
+        original = ex.resolve_commit
+        ex.resolve_commit = lambda url, ref: "d" * 40
+        try:
+            report = execute(
+                load(project),
+                records=[
+                    PromptRecord(prompt="x", id="w", git={"clone_url": "https://h/r"})
+                ],
+                builder=builder,
+                runner=runner,
+                available_env=ENV,
+            )
+        finally:
+            ex.resolve_commit = original
+
+        assert report.ok
+        assert not (report.results[0].directory / "workspace").exists()
+        assert builder.layers and builder.layers[0].tier == "workspace"
+        # the container runs from the workspace image, not the runtime one
+        assert runner.calls[0]["image"].startswith("demo:workspace-")
+        assert runner.calls[0]["workspace"] is None
+
+    def test_a_record_without_a_repo_uses_the_runtime_image(self, project: Path) -> None:
         runner = FakeRunner()
         execute(
             load(project),
-            records=[PromptRecord(prompt="x", id="w", git={"clone_url": str(repo)})],
+            records=[PromptRecord(prompt="x", id="w")],
             builder=FakeBuilder(),
             runner=runner,
             available_env=ENV,
         )
-        assert runner.calls[0]["workspace"] is not None
-        assert runner.calls[0]["spec"].mounts == ()
+        assert runner.calls[0]["image"] == FakeBuild.reference
+
+
+class TestRefResolution:
+    def test_a_full_sha_passes_through_without_network(self) -> None:
+        from jormungandr.execute import resolve_commit
+
+        sha = "a" * 40
+        assert resolve_commit("https://unreachable.invalid/r", sha) == sha
+
+    def test_an_unresolvable_repo_is_a_clear_error(self) -> None:
+        from jormungandr.execute import ExecutionError, resolve_commit
+
+        with pytest.raises(ExecutionError, match="could not resolve|timed out"):
+            resolve_commit("https://github.invalid/nope/nope", "main")
 
 
 class TestMountCollisions:
@@ -527,43 +560,47 @@ class TestMountCollisions:
 class TestReviewRegressions:
     """Each of these reproduces a defect found by adversarial review."""
 
-    def test_a_symlinked_subdirectory_is_refused(self, project: Path, tmp_path) -> None:
-        # A repo can store `pkg` as a symlink to a host path. is_dir() follows
-        # it, shutil.move relocates the link, and Docker resolves a bind-mount
-        # source HOST-side — handing the agent that directory, writable, past
-        # every capability and network restriction.
-        import subprocess
+    def test_no_git_subprocess_runs_on_the_host_for_a_repo_record(
+        self, project: Path, monkeypatch
+    ) -> None:
+        # The symlink escape that made a host-side clone dangerous cannot exist
+        # once the clone happens in the image, where a symlink resolves against
+        # the image's own filesystem. The guarantee is that nothing shells out
+        # to git for the checkout at all — only ls-remote, to pin the commit.
+        import subprocess as sp
 
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        victim = tmp_path / "victim"
-        victim.mkdir()
-        (victim / "secret.txt").write_text("do not touch")
-        (repo / "pkg").symlink_to(victim)
-        (repo / "README.md").write_text("x")
-        run = lambda *a: subprocess.run(a, cwd=repo, check=True, capture_output=True)  # noqa: E731
-        run("git", "init", "--quiet", "-b", "main")
-        run("git", "config", "user.email", "t@e.com")
-        run("git", "config", "user.name", "T")
-        run("git", "add", "-A")
-        run("git", "commit", "--quiet", "-m", "x")
+        calls: list[list[str]] = []
+        real = sp.run
 
-        report = execute(
-            load(project),
-            records=[
-                PromptRecord(
-                    prompt="x",
-                    id="evil",
-                    git={"clone_url": str(repo), "subdirectory": "pkg"},
-                )
-            ],
-            builder=FakeBuilder(),
-            runner=FakeRunner(),
-            available_env=ENV,
-        )
-        assert not report.ok
-        assert "symlink" in (report.results[0].error or "")
-        assert (victim / "secret.txt").read_text() == "do not touch"
+        def record_run(args, *a, **kw):
+            if isinstance(args, (list, tuple)) and args and args[0] == "git":
+                calls.append(list(args))
+            return real(args, *a, **kw)
+
+        monkeypatch.setattr(sp, "run", record_run)
+
+        class Builder(FakeBuilder):
+            def build_layer(self, layer, *, platform, **kwargs):
+                return type("R", (), {"reference": "demo:workspace-x"})()
+
+        import jormungandr.execute as ex
+
+        original = ex.resolve_commit
+        ex.resolve_commit = lambda url, ref: "d" * 40
+        try:
+            execute(
+                load(project),
+                records=[
+                    PromptRecord(prompt="x", id="w", git={"clone_url": "https://h/r"})
+                ],
+                builder=Builder(),
+                runner=FakeRunner(),
+                available_env=ENV,
+            )
+        finally:
+            ex.resolve_commit = original
+
+        assert not [c for c in calls if "clone" in c], f"cloned on the host: {calls}"
 
     def test_a_non_execution_error_fails_only_that_record(self, project: Path) -> None:
         # A clone can raise OSError (disk full) or PermissionError; losing 199
@@ -571,20 +608,20 @@ class TestReviewRegressions:
         # trade.
         import jormungandr.execute as execute_module
 
-        original = execute_module._prepare_workspace
+        original = execute_module._prepare_local_workspace
 
         def explode(record, directory):
             if record.id == "b":
                 raise OSError("no space left on device")
             return original(record, directory)
 
-        execute_module._prepare_workspace = explode
+        execute_module._prepare_local_workspace = explode
         try:
             report = execute(
                 load(project), builder=FakeBuilder(), runner=FakeRunner(), available_env=ENV
             )
         finally:
-            execute_module._prepare_workspace = original
+            execute_module._prepare_local_workspace = original
 
         assert [r.id for r in report.failed] == ["b"]
         assert [r.id for r in report.succeeded] == ["a"]

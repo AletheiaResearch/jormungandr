@@ -70,13 +70,26 @@ image     my-harness:runtime-cf174c9185 (cached)
 Each record gets a directory holding its workspace, raw per-turn output, a
 `result.json`, and the harness's own session record.
 
-A record's workspace is **copied into** the container and copied back out, not
-bind-mounted. A bind mount's source is resolved on the host, so a symlinked
-source exposes whatever it points at — and a repository decides what it stores
-at a path, so validating the config cannot prevent that. Copying makes the
-escape impossible rather than checked-for, and matches what a per-run container
-is for: nothing of the host is reachable from inside it. `run.mounts` remains
-as an explicit, opt-in escape hatch.
+A record that names a repository gets a third image tier — the checkout is
+cloned **by the daemon**, into an image built on the runtime one:
+
+```
+base       OS + toolchains          rarely changes
+runtime    harness + integrations   changes on a version bump
+workspace  the repository at a commit
+```
+
+That tier is content-addressed by the resolved commit, so a retried run reuses
+the checkout instead of cloning again, and two records on the same commit share
+one image. Refs are resolved to a concrete revision with `git ls-remote` before
+building, because a digest can only be honest about fixed content — caching a
+branch name would serve yesterday's code from today's tag.
+
+Cloning inside the image also removes the last thing reaching out of the
+container. Public repositories only; no credentials are read or forwarded.
+
+A *local* workspace is still copied in and copied back out, since it is host
+data by definition. `run.mounts` remains as an explicit, opt-in escape hatch.
 
 Housekeeping: `jormungandr prune` removes images this tool built, and
 `jormungandr reap` removes containers left by crashed runs — by default only those whose owning process is gone, so a

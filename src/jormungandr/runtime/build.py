@@ -169,6 +169,25 @@ class ImageBuilder:
             compose(spec), force=force, on_output=on_output, extra_args=extra_args
         )
 
+    def build_layer(
+        self,
+        layer: ComposedLayer,
+        *,
+        platform: str,
+        force: bool = False,
+        on_output: Callable[[str], None] | None = None,
+    ) -> LayerResult:
+        """Build a single tier that was composed outside an ImageSpec."""
+        self.docker.require()
+        return self._build_layer(
+            layer,
+            platform=platform,
+            build_args={},
+            force=force,
+            on_output=on_output,
+            extra_args=(),
+        )
+
     def build_composed(
         self,
         composed: ComposedImage,

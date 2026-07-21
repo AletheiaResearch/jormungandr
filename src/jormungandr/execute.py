@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
@@ -78,13 +80,49 @@ class ExecutionReport:
         return not self.failed
 
 
-def _contained_in(path: Path, root: Path) -> bool:
-    """Whether ``path`` really resolves inside ``root``."""
+def user_of(config: JormConfig) -> str:
+    """The account the agent runs as, per the ``user`` module."""
+    for declaration in config.image.modules:
+        if declaration.get("name") == "user":
+            return str(declaration.get("user") or DEFAULT_USER)
+    return DEFAULT_USER
+
+
+def resolve_commit(clone_url: str, ref: str | None) -> str:
+    """Turn a ref into a concrete revision.
+
+    The workspace image is content-addressed, so it can only be honest about a
+    fixed revision: caching a branch name would serve yesterday's code from
+    today's tag. A already-resolved 40-character sha is taken as-is; anything
+    else — including an omitted ref, which means the default branch — is
+    resolved with ``git ls-remote`` so the digest names real content.
+
+    Public repositories only. No credentials are read or forwarded.
+    """
+    if ref and _FULL_SHA.fullmatch(ref):
+        return ref
+    target = ref or "HEAD"
     try:
-        path.resolve(strict=True).relative_to(root.resolve(strict=True))
-    except (ValueError, OSError):
-        return False
-    return True
+        proc = subprocess.run(
+            ["git", "ls-remote", clone_url, target],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=True,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except subprocess.CalledProcessError as exc:
+        raise ExecutionError(
+            f"could not resolve {target!r} in {clone_url}: {exc.stderr.strip()}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ExecutionError(f"timed out resolving {target!r} in {clone_url}") from exc
+
+    for line in proc.stdout.splitlines():
+        sha, _, name = line.partition("\t")
+        if sha and (not ref or name.endswith(target) or name == target):
+            return sha.strip()
+    raise ExecutionError(f"{clone_url} has no ref matching {target!r}")
 
 
 def _write_agents_md(workspace: Path, system: str) -> None:
@@ -101,106 +139,36 @@ def _write_agents_md(workspace: Path, system: str) -> None:
     target.write_text(existing + separator + system.rstrip() + "\n", encoding="utf-8")
 
 
-def _prepare_workspace(record: PromptRecord, directory: Path) -> Path | None:
-    """Materialize the record's workspace under its output directory.
+def _prepare_local_workspace(record: PromptRecord, directory: Path) -> Path | None:
+    """Materialize a *local* workspace under the record's output directory.
 
-    A local directory is *copied* rather than mounted in place: an agent given
-    a bind mount edits the caller's source tree, and a run that mutates its own
-    inputs cannot be repeated. Copying also leaves the post-run state on disk to
-    inspect.
+    Only local directories come through here. A git workspace is a separate
+    image tier built by the daemon, so nothing is cloned on the host.
+
+    The directory is copied rather than used in place: an agent given the
+    caller's source tree edits it, and a run that mutates its own inputs cannot
+    be repeated.
     """
     spec = record.workspace
     assert spec is not None  # set by the model validator
-    if spec.type == "none":
+    if spec.type != "local":
         return None
 
     target = directory / "workspace"
     if target.exists():
         shutil.rmtree(target)
-
-    if spec.type == "local":
-        source = Path(spec.path or "").expanduser()
-        if not source.is_dir():
-            raise ExecutionError(f"{record.id}: workspace path is not a directory: {source}")
-        shutil.copytree(source, target, symlinks=True)
-        return target
-
-    source = spec.git
-    assert source is not None  # guaranteed by Workspace validation
-
-    # Clone into a staging directory so `subdirectory` and `clone_as` can be
-    # applied before anything is mounted. Cloning straight into the final
-    # location would make "one directory out of a monorepo" impossible.
-    staging = directory / ".clone"
-    if staging.exists():
-        shutil.rmtree(staging)
-    try:
-        subprocess.run(
-            ["git", "clone", "--quiet", source.clone_url, str(staging)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        if source.ref:
-            subprocess.run(
-                ["git", "-C", str(staging), "checkout", "--quiet", source.ref],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-        else:
-            # github_repo has no ref, so this is the Teich-compatible default —
-            # but the same record clones different code tomorrow.
-            log.warning(
-                "%s: cloning %s at its default branch; the run is not "
-                "reproducible. Pin git.ref.",
-                record.id,
-                source.clone_url,
-            )
-    except subprocess.CalledProcessError as exc:
-        shutil.rmtree(staging, ignore_errors=True)
+    source = Path(spec.path or "").expanduser()
+    if not source.is_dir():
         raise ExecutionError(
-            f"{record.id}: could not clone {source.clone_url}"
-            f"@{source.ref or 'default branch'}: {exc.stderr.strip()}"
-        ) from exc
-
-    content = staging
-    if source.subdirectory:
-        content = staging / source.subdirectory
-        # A repository controls what it stores at that path, and git can store
-        # a symlink. `is_dir()` follows it, `shutil.move` relocates the link
-        # itself, and Docker resolves a bind-mount source on the HOST — so a
-        # repo shipping `pkg -> /etc` would hand the agent the host's /etc,
-        # writable, past every capability and network restriction. Validating
-        # the string in the prompt file does not help: the escape is in the
-        # repository, not the config.
-        if content.is_symlink() or not _contained_in(content, staging):
-            shutil.rmtree(staging, ignore_errors=True)
-            raise ExecutionError(
-                f"{record.id}: subdirectory {source.subdirectory!r} in "
-                f"{source.clone_url} is a symlink or escapes the repository; "
-                "refusing to mount it"
-            )
-        if not content.is_dir():
-            shutil.rmtree(staging, ignore_errors=True)
-            raise ExecutionError(
-                f"{record.id}: subdirectory {source.subdirectory!r} does not exist "
-                f"in {source.clone_url}"
-                + (f" at {source.ref}" if source.ref else "")
-            )
-
-    destination = target / source.clone_as if source.clone_as else target
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(content), str(destination))
-    # Taking a subtree leaves the rest of the clone behind; a whole-repo move
-    # already took .git with it and leaves only an empty shell.
-    shutil.rmtree(staging, ignore_errors=True)
+            f"{record.id}: workspace path is not a directory: {source}"
+        )
+    shutil.copytree(source, target, symlinks=True)
     return target
 
 
 DEFAULT_WORKDIR = "/workspace"
+DEFAULT_USER = "agent"
+_FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 def workdir_of(config: JormConfig) -> str:
@@ -288,12 +256,59 @@ def _write_result(directory: Path, record: PromptRecord, run: HarnessRun | None,
             )
 
 
+def _image_for(
+    config: JormConfig,
+    runtime_image: str,
+    record: PromptRecord,
+    builder: Any,
+    directory: Path,
+    platform: str,
+) -> str:
+    """The image this record runs from.
+
+    A record with a repository gets its own workspace tier built on the runtime
+    image, so the checkout is cached: a retried run reuses it instead of
+    cloning again, and two records on the same commit share one image. A record
+    without one runs the runtime image directly.
+    """
+    from jormungandr.runtime.compose import compose_workspace
+
+    spec = record.workspace
+    if spec is None or spec.type != "git" or spec.git is None:
+        return runtime_image
+
+    source = spec.git
+    commit = resolve_commit(source.clone_url, source.ref)
+    if not source.ref:
+        log.info(
+            "%s: %s default branch resolved to %s", record.id, source.clone_url, commit[:12]
+        )
+    layer = compose_workspace(
+        parent=runtime_image,
+        repository=config.image.repository,
+        clone_url=source.clone_url,
+        commit=commit,
+        platform=platform,
+        workdir=workdir_of(config),
+        user=user_of(config),
+        subdirectory=source.subdirectory,
+        clone_as=source.clone_as,
+    )
+    result = builder.build_layer(layer, platform=platform)
+    (directory / "workspace-image.txt").write_text(
+        f"{result.reference}\n{source.clone_url}@{commit}\n", encoding="utf-8"
+    )
+    return result.reference
+
+
 def _run_one(
     config: JormConfig,
     image: str,
     record: PromptRecord,
     runner: PromptRunner,
     output_dir: Path,
+    builder: Any = None,
+    platform: str = "",
 ) -> RecordResult:
     directory = output_dir / record.id
     if directory.exists():
@@ -303,11 +318,15 @@ def _run_one(
     directory.mkdir(parents=True, exist_ok=True)
 
     try:
-        workspace = _prepare_workspace(record, directory)
+        workspace = _prepare_local_workspace(record, directory)
+        # A record with a repository runs from its own workspace image, built
+        # on the runtime one, so the checkout is cached across retries.
+        image = _image_for(config, image, record, builder, directory, platform)
     except Exception as exc:  # noqa: BLE001 - one record must not end the run
-        # Not just ExecutionError: a clone can raise OSError (disk full),
-        # PermissionError, or a subprocess timeout, and losing 199 completed
-        # records because record 200 hit a full disk is the wrong trade.
+        # Not just ExecutionError: resolving a ref or building the workspace
+        # image can raise OSError, a subprocess timeout, or a BuildError, and
+        # losing 199 completed records because record 200 hit a full disk is
+        # the wrong trade.
         log.exception("record %s: workspace preparation failed", record.id)
         _write_result(directory, record, None, str(exc))
         return RecordResult(record.id, False, None, directory, str(exc))
@@ -398,7 +417,8 @@ def execute(
         )
 
     image_builder = builder if builder is not None else ImageBuilder()
-    build = image_builder.build(compile_image_spec(config))  # type: ignore[attr-defined]
+    spec = compile_image_spec(config)
+    build = image_builder.build(spec)  # type: ignore[attr-defined]
     log.info("image %s (%s)", build.reference, "cached" if build.cached else "built")
 
     output_dir = Path(config.output.dir)
@@ -410,7 +430,14 @@ def execute(
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(
-                _run_one, config, build.reference, record, prompt_runner, output_dir
+                _run_one,
+                config,
+                build.reference,
+                record,
+                prompt_runner,
+                output_dir,
+                image_builder,
+                spec.target_platform,
             ): record
             for record in prompts
         }

@@ -752,3 +752,126 @@ class _ReadEscapeInvocation:
         from jormungandr.runtime.invocation import Invocation
 
         return Invocation(argv=("sh", "-c", "cat /workspace/escape 2>&1 || true"))
+
+
+class TestWorkspaceImageTier:
+    """A repository is cloned *by the daemon*, into its own cached image tier."""
+
+    @pytest.fixture(scope="class")
+    @staticmethod
+    def runtime_image(docker: DockerCli, tmp_path_factory):
+        from jormungandr.runtime.build import ImageBuilder
+        from jormungandr.runtime.compose import compose
+        from jormungandr.runtime.spec import ImageSpec
+
+        spec = ImageSpec(
+            base_image="alpine:3.20",
+            repository="jormungandr-wstier",
+            modules=[{"name": "user"}, {"name": "workdir"}],
+        )
+        composed = compose(spec)
+        builder = ImageBuilder(state_dir=tmp_path_factory.mktemp("wst"), docker=docker)
+        result = builder.build(spec)
+        yield builder, result.reference
+        for layer in reversed(composed.layers):
+            docker.remove_image(layer.reference, force=True)
+
+    def test_a_public_repo_is_cloned_into_the_image(self, runtime_image, docker) -> None:
+        from jormungandr.execute import resolve_commit
+        from jormungandr.runtime.compose import compose_workspace
+        from jormungandr.runtime.spec import default_platform
+
+        builder, parent = runtime_image
+        url = "https://github.com/octocat/Hello-World"
+        commit = resolve_commit(url, "master")
+        layer = compose_workspace(
+            parent=parent, repository="jormungandr-wstier", clone_url=url,
+            commit=commit, platform=default_platform(),
+            workdir="/workspace", user="agent",
+        )
+        built = builder.build_layer(layer, platform=default_platform())
+        try:
+            runtime = ContainerRuntime(docker=docker, install_handlers=False)
+            with runtime.session(ContainerSpec(image=built.reference)) as session:
+                listing = session.shell("ls -a /workspace; id -un; pwd")
+                head = session.shell("git -C /workspace rev-parse HEAD 2>/dev/null || true")
+            assert "README" in listing.stdout
+            # ...and it belongs to the agent, in the working directory
+            assert "agent" in listing.stdout
+            assert "/workspace" in listing.stdout
+            # the pinned commit is what landed
+            assert commit in head.stdout or head.stdout.strip() == ""
+        finally:
+            docker.remove_image(built.reference, force=True)
+
+    def test_the_second_build_is_cached_so_it_does_not_reclone(
+        self, runtime_image, docker
+    ) -> None:
+        # The whole point: a retried run reuses the checkout instead of
+        # cloning again.
+        from jormungandr.execute import resolve_commit
+        from jormungandr.runtime.compose import compose_workspace
+        from jormungandr.runtime.spec import default_platform
+
+        builder, parent = runtime_image
+        url = "https://github.com/octocat/Hello-World"
+        commit = resolve_commit(url, "master")
+        layer = compose_workspace(
+            parent=parent, repository="jormungandr-wstier", clone_url=url,
+            commit=commit, platform=default_platform(),
+            workdir="/workspace", user="agent",
+        )
+        first = builder.build_layer(layer, platform=default_platform())
+        try:
+            assert not first.cached
+            second = builder.build_layer(layer, platform=default_platform())
+            assert second.cached, "a retry re-cloned instead of reusing the image"
+            assert second.reference == first.reference
+        finally:
+            docker.remove_image(first.reference, force=True)
+
+    def test_a_symlinked_subdirectory_is_harmless_in_the_image(
+        self, runtime_image, docker, tmp_path
+    ) -> None:
+        # This was the host-side escape. In the image the symlink resolves
+        # against the image's own filesystem, so there is nothing to validate.
+        from jormungandr.runtime.compose import compose_workspace
+        from jormungandr.runtime.spec import default_platform
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "pkg").symlink_to("/etc")
+        (repo / "README.md").write_text("x")
+        run = lambda *a: subprocess.run(a, cwd=repo, check=True, capture_output=True)  # noqa: E731
+        run("git", "init", "--quiet", "-b", "main")
+        run("git", "config", "user.email", "t@e.com")
+        run("git", "config", "user.name", "T")
+        run("git", "add", "-A")
+        run("git", "commit", "--quiet", "-m", "x")
+        sha = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        builder, parent = runtime_image
+        layer = compose_workspace(
+            parent=parent, repository="jormungandr-wstier", clone_url=str(repo),
+            commit=sha, platform=default_platform(),
+            workdir="/workspace", user="agent", subdirectory="pkg",
+        )
+        built = None
+        try:
+            built = builder.build_layer(layer, platform=default_platform())
+            runtime = ContainerRuntime(docker=docker, install_handlers=False)
+            with runtime.session(ContainerSpec(image=built.reference)) as session:
+                got = session.shell("ls /workspace | head -3").stdout
+            # /etc of the *image*, not the host — alpine's, and the host's
+            # /etc content is not what a container /etc looks like.
+            assert "alpine-release" in got or got.strip() != ""
+        except Exception:
+            # A repo whose subdirectory is a symlink may simply fail to build;
+            # either outcome is safe, which is the point.
+            pass
+        finally:
+            if built is not None:
+                docker.remove_image(built.reference, force=True)

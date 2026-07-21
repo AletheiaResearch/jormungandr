@@ -76,9 +76,11 @@ class HarnessInvocation(Protocol):
 class OpenCodeInvocation:
     """``opencode run`` — OpenCode's non-interactive mode.
 
-    ``opencode serve`` also exists and is the better surface for driving many
-    turns against one process, but it is a server rather than a one-shot
-    command, so it belongs with the run logic rather than here.
+    OpenCode also has a headless server (``opencode serve``), which would be a
+    better surface for many turns against one process. It is deliberately not
+    used: every turn here is a fresh exec, which is uniform across harnesses,
+    and adopting a server for one of them would put two execution models in one
+    runner. See docs/notes.md.
     """
 
     harness = "opencode"
