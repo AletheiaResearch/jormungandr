@@ -56,14 +56,14 @@ def simple_spec(**kwargs) -> ImageSpec:
 
 class TestWriteContext:
     def test_writes_dockerfile_and_dockerignore(self, builder: ImageBuilder) -> None:
-        composed = compose(simple_spec())
-        context = builder.write_context(composed)
-        assert (context / "Dockerfile").read_text() == composed.dockerfile
+        layer = compose(simple_spec()).base
+        context = builder.write_context(layer)
+        assert (context / "Dockerfile").read_text() == layer.dockerfile
         assert "!Dockerfile" in (context / ".dockerignore").read_text()
 
     def test_writes_module_files_with_modes(self, builder: ImageBuilder) -> None:
-        composed = compose(simple_spec(modules=[{"name": "script", "content": "echo x"}]))
-        context = builder.write_context(composed)
+        layer = compose(simple_spec(modules=[{"name": "script", "content": "echo x"}])).runtime
+        context = builder.write_context(layer)
         script = context / "script.sh"
         assert script.read_text() == "echo x\n"
         assert script.stat().st_mode & 0o777 == 0o755
@@ -71,25 +71,25 @@ class TestWriteContext:
     def test_dockerignore_allows_declared_module_files(self, builder: ImageBuilder) -> None:
         # A static `*` + `!Dockerfile` silently drops every baked-in script and
         # only fails later, as a COPY that cannot find its source.
-        composed = compose(simple_spec(modules=[{"name": "script", "content": "echo x"}]))
-        context = builder.write_context(composed)
+        layer = compose(simple_spec(modules=[{"name": "script", "content": "echo x"}])).runtime
+        context = builder.write_context(layer)
         assert "!script.sh" in (context / ".dockerignore").read_text()
 
     def test_context_is_rebuilt_from_scratch(self, builder: ImageBuilder) -> None:
-        composed = compose(simple_spec())
-        context = builder.write_context(composed)
+        layer = compose(simple_spec()).base
+        context = builder.write_context(layer)
         stale = context / "stale.txt"
         stale.write_text("left over")
-        builder.write_context(composed)
+        builder.write_context(layer)
         assert not stale.exists()
 
     def test_log_is_not_inside_the_context(self, builder: ImageBuilder) -> None:
         # SWE-bench writes its build log into the context and ships it to the
         # daemon on every rebuild.
-        composed = compose(simple_spec())
-        context = builder.write_context(composed)
-        assert builder.log_path(composed.digest) not in context.parents
-        assert builder.log_path(composed.digest).parent != context
+        layer = compose(simple_spec()).base
+        context = builder.write_context(layer)
+        assert builder.log_path(layer.digest).parent != context
+        assert context not in builder.log_path(layer.digest).parents
 
     def test_context_validation_happens_before_any_build_log_is_promised(
         self, builder: ImageBuilder
@@ -121,27 +121,39 @@ class TestWriteContext:
 
 
 class TestBuild:
-    def test_builds_when_absent(self, builder: ImageBuilder) -> None:
+    def test_builds_both_tiers_when_absent(self, builder: ImageBuilder) -> None:
         result = builder.build(simple_spec())
         assert result.built
         assert not result.cached
-        assert result.log_path.exists()
+        assert [layer.tier for layer in result.layers] == ["base", "runtime"]
+        assert all(layer.log_path.exists() for layer in result.layers)
 
-    def test_skips_when_image_already_exists(self, tmp_path: Path) -> None:
+    def test_skips_when_both_tiers_exist(self, tmp_path: Path) -> None:
         composed = compose(simple_spec())
-        docker = FakeDocker(existing={composed.reference})
+        docker = FakeDocker(existing={composed.base.reference, composed.runtime.reference})
         builder = ImageBuilder(state_dir=tmp_path, docker=docker)
         result = builder.build(simple_spec())
         assert result.cached
         assert docker.builds == []
 
+    def test_cached_base_is_reused_while_the_runtime_rebuilds(self, tmp_path: Path) -> None:
+        # The payoff of tiering: an existing base is not rebuilt.
+        composed = compose(simple_spec())
+        docker = FakeDocker(existing={composed.base.reference})
+        builder = ImageBuilder(state_dir=tmp_path, docker=docker)
+        result = builder.build(simple_spec())
+        assert result.layers[0].cached
+        assert not result.layers[1].cached
+        assert len(docker.builds) == 1
+        assert composed.runtime.reference in docker.builds[0]
+
     def test_force_rebuilds_and_disables_cache(self, tmp_path: Path) -> None:
         composed = compose(simple_spec())
-        docker = FakeDocker(existing={composed.reference})
+        docker = FakeDocker(existing={composed.base.reference, composed.runtime.reference})
         builder = ImageBuilder(state_dir=tmp_path, docker=docker)
         result = builder.build(simple_spec(), force=True)
         assert result.built
-        assert "--no-cache" in docker.builds[0]
+        assert all("--no-cache" in build for build in docker.builds)
 
     def test_platform_passed_as_build_flag(self, tmp_path: Path) -> None:
         docker = FakeDocker()
@@ -160,10 +172,11 @@ class TestBuild:
         composed = compose(simple_spec())
         result = builder.build(simple_spec())
         assert result.reference.endswith(composed.digest)
+        assert result.reference == composed.runtime.reference
 
     def test_log_records_the_dockerfile(self, builder: ImageBuilder) -> None:
         result = builder.build(simple_spec())
-        log = result.log_path.read_text()
+        log = result.layers[0].log_path.read_text()
         assert "FROM debian:trixie-slim" in log
         assert "#5 DONE" in log
 

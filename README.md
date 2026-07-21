@@ -2,9 +2,12 @@
 
 Compose Docker images and run containers for agent harnesses.
 
-This is the runtime layer: it builds images that can run agent CLIs (Claude
-Code, Codex, Gemini, opencode) and manages the containers they run in. It does
-not read, parse, or convert traces — that lives elsewhere.
+This is the runtime layer: it builds images that can run agent CLIs and manages
+the containers they run in. It does not read, parse, or convert traces.
+
+**Status: internals only.** There is no CLI surface yet, and no logic for
+actually *running* a harness — only the mechanism for building the image and
+managing containers. OpenCode is the first supported harness; others follow.
 
 ## Install
 
@@ -15,61 +18,87 @@ uv sync
 Requires the `docker` CLI and a running daemon. No Python Docker SDK is used;
 see [Why the docker CLI](#why-the-docker-cli).
 
-## Quick start
+## Usage
 
-Describe an image:
+```python
+from pathlib import Path
 
-```yaml
-# harness.yaml
-base_image: node:22-bookworm-slim
-repository: my-harness
-modules:
-  - name: apt
-    packages: [git, curl, ca-certificates]
-  - name: node
-    preinstalled: true          # the base image already has it
-  - name: agent
-    harness: claude-code
-    version: "2.0.1"
-  - name: workspace
-```
+from jormungandr.runtime.build import ImageBuilder
+from jormungandr.runtime.spec import ImageSpec
+import jormungandr.runtime.modules.builtin  # registers the built-in modules
 
-Inspect, build, run:
+spec = ImageSpec(
+    base_image="node:22-bookworm-slim",
+    repository="my-harness",
+    modules=[
+        {"name": "apt", "packages": ["git", "curl", "ca-certificates"]},
+        {"name": "node", "preinstalled": True},   # base image already has it
+        {"name": "opencode"},
+        {"name": "workspace"},
+    ],
+)
 
-```sh
-jormungandr image render harness.yaml     # see the Dockerfile, build nothing
-jormungandr image build  harness.yaml     # build (skipped if unchanged)
-jormungandr image modules                 # list available modules
-
-jormungandr container run my-harness:<digest> --name work sleep infinity
-jormungandr container exec work claude --version
-jormungandr container list
-jormungandr container reap                # clean up after crashed runs
+result = ImageBuilder().build(spec)
+for layer in result.layers:
+    print(layer.tier, "cached" if layer.cached else "built", layer.reference)
+# base     built  my-harness:base-9b643a15e3ad0303
+# runtime  built  my-harness:runtime-f725284cd47b8563
 ```
 
 ## How it works
+
+### Tiers
+
+An image is built as two independently tagged, independently cached tiers:
+
+| Tier | Contents | Changes |
+|---|---|---|
+| `base` | OS packages, language toolchains | rarely; shared by every runtime on it |
+| `runtime` | harnesses, integrations, user scripts | often |
+
+The runtime's `FROM` names the base by its content-addressed tag, so a base
+change propagates into the runtime digest automatically — there is no separate
+bookkeeping to forget.
+
+Bumping a harness version rebuilds only the runtime; the base build is skipped
+outright, not merely layer-cached:
+
+```
+bumped opencode 1.18.4 -> 1.18.3 in 9.6s
+  base     CACHED  my-harness:base-9b643a15e3ad0303
+  runtime  BUILT   my-harness:runtime-9edc625adab4415d
+```
+
+The split point is `ImageSpec.tier_split` (default `Stage.TOOLCHAIN`). Raise it
+above `USER` to put everything in the base tier; lower it below `SYSTEM` to put
+everything in the runtime tier.
+
+Why tiers at all, when stage ordering already lets BuildKit's layer cache skip
+the expensive prefix: that cache is local and evictable. A fresh CI runner or a
+`docker builder prune` rebuilds everything, whereas a separately tagged base
+image can be pulled.
 
 ### Modules
 
 An image is a base plus an ordered list of modules. A module contributes
 Dockerfile instructions and, optionally, files baked into the build context.
 
-Built-ins: `apt`, `node`, `python`, `agent`, `langfuse`, `script`, `workspace`.
+Built-ins: `apt`, `node`, `python`, `opencode`, `langfuse`, `script`,
+`workspace`.
 
 Modules are ordered by a topological sort over their `requires`, with ties
 broken by `(stage, name)` — never by the order you happened to list them in,
 because that order feeds the image hash.
 
-Stages run in rate-of-change order, so the layers that change most often sit
-on top and invalidate the least below them:
+Stages run in rate-of-change order, and also determine the tier split:
 
-| Stage | Purpose |
-|---|---|
-| `SYSTEM` | OS packages, users |
-| `TOOLCHAIN` | language runtimes (node, python, uv) |
-| `HARNESS` | agent CLIs |
-| `INTEGRATION` | tracing, proxies, plugins |
-| `USER` | caller scripts, workspace |
+| Stage | Purpose | Default tier |
+|---|---|---|
+| `SYSTEM` (10) | OS packages, users | base |
+| `TOOLCHAIN` (20) | language runtimes (node, python, uv) | base |
+| `HARNESS` (30) | agent CLIs | runtime |
+| `INTEGRATION` (40) | tracing, proxies, plugins | runtime |
+| `USER` (50) | caller scripts, workspace | runtime |
 
 Adding a capability is one class, one registry line, one test:
 
@@ -98,22 +127,38 @@ Third parties can ship modules without forking, via entry points:
 ripgrep = "my_package.modules:Ripgrep"
 ```
 
+### OpenCode
+
+The first supported harness. OpenCode ships as an npm package whose real
+payload is a set of platform-specific prebuilt binaries published as optional
+dependencies (`opencode-linux-arm64`, `opencode-linux-x64`, plus musl and
+baseline variants). npm resolves the right one for the platform it installs on,
+so the ordinary global install works on both glibc and musl bases — verified
+against `node:22-bookworm-slim` and `node:22-alpine`.
+
+The version is pinned by default. An unpinned `@latest` would make the digest
+lie: the same tag would refer to different software depending on when it was
+built. The build also runs `opencode --version` as its last step, because npm
+exits 0 even when no optional binary matched the platform — actually running it
+is the only proof the install is usable.
+
 ### Image identity
 
-The tag *is* the cache key. It is a SHA-256 over the rendered Dockerfile, every
-build-context file, and the resolved module configuration:
+The tag *is* the cache key: a SHA-256 over the rendered Dockerfile, every
+build-context file and its mode, the parent reference, and the resolved module
+configuration.
 
 ```
-my-harness:4c6616efbec2d6c0
+my-harness:runtime-f725284cd47b8563
 ```
 
 Change a package, a script, a pinned version, or the base image, and the tag
-changes and a rebuild happens. Change nothing and the build is skipped. There
-is no mtime check and no force-rebuild flag to remember.
+changes and a rebuild happens. Change nothing and the build is skipped. There is
+no mtime check and no force-rebuild flag to remember.
 
 Every image is stamped with OCI labels (`dev.jormungandr.*`). Discovery and
-pruning filter on those labels, never on name prefixes, so `image prune` can
-never touch an unrelated image of yours.
+pruning filter on those labels, never on name prefixes, so `prune` can never
+touch an unrelated image of yours.
 
 ### Containers
 
@@ -129,16 +174,16 @@ look like credentials, because `-e KEY=value` is visible in host `ps` and is
 recorded permanently in `docker inspect`.
 
 Crash recovery works because every container is labelled at creation. `atexit`
-and signal handlers cover the ordinary cases; `jormungandr container reap`
-covers SIGKILL, which no in-process handler can.
+and signal handlers cover the ordinary cases; `ContainerRuntime.reap_orphans()`
+covers SIGKILL, which no in-process handler can. It removes only containers
+whose owning process is gone, so a concurrent session's containers survive.
 
 ## Why the docker CLI
 
-Not docker-py. It drives the legacy build endpoint, which Docker has
-deprecated ("the legacy builder is deprecated and will be removed in a future
-release") and which cannot reach BuildKit — so `RUN --mount=type=cache` is
-unavailable. Cache mounts are the largest available build-speed win for
-repeated apt/npm installs.
+Not docker-py. It drives the legacy build endpoint, which Docker has deprecated
+("the legacy builder is deprecated and will be removed in a future release") and
+which cannot reach BuildKit — so `RUN --mount=type=cache` is unavailable. Cache
+mounts are the largest available build-speed win for repeated apt/npm installs.
 
 `docker exec` also hands back the exit status as a subprocess return code with
 already-separated stdout/stderr, where the HTTP API needs a follow-up
@@ -162,13 +207,12 @@ daemon. Anything that touches Docker is behind the `docker` marker.
 
 ```
 src/jormungandr/
-  cli.py                 declarations only; heavy imports live in commands/
-  commands/              command implementations
+  cli.py                 launcher only; no commands wired up yet
   runtime/
     layers.py            typed Dockerfile instructions + renderer
     modules/             the composable module contract, registry, built-ins
     spec.py              ImageSpec / ContainerSpec / ResourceLimits
-    compose.py           spec -> Dockerfile + context + digest (pure)
+    compose.py           spec -> tiered Dockerfiles + contexts + digests (pure)
     identity.py          content hashing, tags, labels
     docker.py            thin typed wrapper over the docker CLI
     build.py             context assembly, BuildKit invocation, logs

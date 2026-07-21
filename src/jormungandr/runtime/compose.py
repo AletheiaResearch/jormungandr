@@ -1,8 +1,20 @@
-"""Turn an :class:`ImageSpec` into a rendered Dockerfile and build context.
+"""Turn an :class:`ImageSpec` into rendered Dockerfiles and build contexts.
 
 Pure: no daemon, no network, no filesystem, no clock. That is what lets the
 whole composition and identity layer be tested without Docker, and it is why
-the resulting digest is trustworthy as a cache key.
+the resulting digests are trustworthy as cache keys.
+
+An image is composed as two tiers:
+
+* **base** — OS packages and language toolchains. Changes rarely, shared by
+  every runtime image built on it.
+* **runtime** — harnesses, integrations, user scripts. Changes often.
+
+Each tier is independently content-addressed and independently tagged, so a
+harness bump rebuilds only the runtime image, and a cold machine can pull the
+base rather than rebuild it. The runtime's ``FROM`` names the base by its
+content-addressed tag, so a base change propagates into the runtime digest
+automatically — there is no separate bookkeeping to forget.
 """
 
 from __future__ import annotations
@@ -24,17 +36,82 @@ from jormungandr.runtime.modules.base import BuildContext, Module
 from jormungandr.runtime.modules.registry import ModuleRegistry, build_modules
 from jormungandr.runtime.spec import ImageSpec
 
-__all__ = ["ComposedImage", "ComposeError", "compose"]
+__all__ = [
+    "BASE_TIER",
+    "RUNTIME_TIER",
+    "ComposeError",
+    "ComposedImage",
+    "ComposedLayer",
+    "compose",
+]
+
+BASE_TIER = "base"
+RUNTIME_TIER = "runtime"
 
 
 class ComposeError(ValueError):
     """A spec cannot be turned into a coherent image."""
 
 
+@dataclass(frozen=True, slots=True)
+class ComposedLayer:
+    """One fully determined, not-yet-built tier."""
+
+    tier: str
+    dockerfile: str
+    context_files: Mapping[str, str]
+    context_modes: Mapping[str, int]
+    digest: str
+    reference: str
+    module_names: tuple[str, ...]
+    parent: str | None
+
+    @property
+    def tag(self) -> str:
+        return self.reference.rsplit(":", 1)[1]
+
+
+@dataclass(frozen=True, slots=True)
+class ComposedImage:
+    """The tiers of one image, base first."""
+
+    spec: ImageSpec
+    layers: tuple[ComposedLayer, ...]
+
+    @property
+    def base(self) -> ComposedLayer:
+        return self.layers[0]
+
+    @property
+    def runtime(self) -> ComposedLayer:
+        return self.layers[-1]
+
+    # The image a caller ultimately runs is the last tier.
+    @property
+    def digest(self) -> str:
+        return self.runtime.digest
+
+    @property
+    def reference(self) -> str:
+        return self.runtime.reference
+
+    @property
+    def tag(self) -> str:
+        return self.runtime.tag
+
+    @property
+    def dockerfile(self) -> str:
+        return self.runtime.dockerfile
+
+    @property
+    def module_names(self) -> tuple[str, ...]:
+        return tuple(n for layer in self.layers for n in layer.module_names)
+
+
 def _check_context_files_are_used(
     files: Mapping[str, str],
     instructions: Sequence[Instruction],
-    repository: str,
+    label: str,
 ) -> None:
     """Every file a module bakes into the context must actually be COPYed.
 
@@ -42,8 +119,7 @@ def _check_context_files_are_used(
     by substring search over the Dockerfile text. A substring test both misses
     real mistakes — 'requirements.txt' is a substring of an unrelated
     '/opt/requirements.txt' mentioned in a RUN — and rejects a legitimate
-    'COPY *.sh /opt/'. Getting this wrong reproduces the exact defect it exists
-    to prevent: a file silently never copied, failing much later.
+    'COPY *.sh /opt/'.
     """
     if not files:
         return
@@ -60,7 +136,7 @@ def _check_context_files_are_used(
     }
     if unused:
         raise ComposeError(
-            f"{repository}: modules added context files that no COPY "
+            f"{label}: modules added context files that no COPY "
             f"instruction references: {sorted(unused)}"
         )
 
@@ -71,59 +147,35 @@ def _matches_glob(name: str, pattern: str) -> bool:
     return ("*" in pattern or "?" in pattern or "[" in pattern) and fnmatch(name, pattern)
 
 
-@dataclass(frozen=True, slots=True)
-class ComposedImage:
-    """A fully determined, not-yet-built image."""
-
-    spec: ImageSpec
-    dockerfile: str
-    context_files: Mapping[str, str]
-    context_modes: Mapping[str, int]
-    digest: str
-    reference: str
-    module_names: tuple[str, ...]
-
-    @property
-    def tag(self) -> str:
-        return self.reference.rsplit(":", 1)[1]
-
-
-def compose(
-    spec: ImageSpec,
+def _compose_layer(
     *,
-    registry: ModuleRegistry | None = None,
-) -> ComposedImage:
-    """Resolve modules, render the Dockerfile, and derive the image identity."""
-    modules: tuple[Module, ...] = build_modules(
-        [{"name": d.name, **d.config()} for d in spec.modules],
-        registry=registry,
-    )
-
+    spec: ImageSpec,
+    tier: str,
+    parent: str,
+    modules: Sequence[Module],
+    include_build_args: bool,
+) -> ComposedLayer:
     context = BuildContext()
     body: list[Instruction] = [
         Comment(
-            "Generated by jormungandr. Do not edit.\n"
-            "This file is reproducible: the same ImageSpec always renders "
-            "byte-identical output."
+            f"Generated by jormungandr ({tier} tier). Do not edit.\n"
+            "Reproducible: the same ImageSpec always renders byte-identical output."
         ),
         # Platform is passed to `docker build --platform`, not baked into FROM:
-        # a constant --platform in the Dockerfile is flagged by BuildKit
-        # (FromPlatformFlagConstDisallowed), makes the file non-portable, and
-        # conflicts with buildx's own flag. It still feeds the digest below, so
-        # an amd64 and an arm64 build remain distinct images.
-        From(spec.base_image),
+        # BuildKit flags a constant --platform (FromPlatformFlagConstDisallowed),
+        # it makes the file non-portable, and it conflicts with buildx's own
+        # flag. It still feeds the digest below, so an amd64 and an arm64 build
+        # remain distinct images.
+        From(parent),
     ]
-    body += [Arg(name, value) for name, value in sorted(spec.build_args.items())]
+    if include_build_args:
+        body += [Arg(name, value) for name, value in sorted(spec.build_args.items())]
 
     for module in modules:
         body.extend(module.instructions(context))
 
     module_names = tuple(m.name for m in modules)
-
-    # The digest covers the rendered Dockerfile, every context file, and the
-    # resolved module identities. Labels are appended afterwards so that
-    # stamping the digest into the image cannot change the digest.
-    _check_context_files_are_used(context.files, body, spec.repository)
+    _check_context_files_are_used(context.files, body, f"{spec.repository}:{tier}")
 
     provisional = render_dockerfile(body)
     digest = content_digest(
@@ -131,14 +183,14 @@ def compose(
         context_files=context.files,
         context_modes=context.modes,
         extra={
-            "base_image": spec.base_image,
+            # `parent` is in the rendered FROM already, but naming it explicitly
+            # keeps the digest meaningful if the renderer ever changes.
+            "parent": parent,
+            "tier": tier,
             "platform": spec.target_platform,
-            "build_args": dict(spec.build_args),
+            "build_args": dict(spec.build_args) if include_build_args else {},
             # Labels are rendered into the Dockerfile, so they are part of the
-            # image and must be part of its identity. Omitting them means two
-            # differently-labelled images share a tag and the second build is
-            # silently skipped, leaving the first image's labels in place —
-            # which then breaks the label-based discovery this tool relies on.
+            # image and must be part of its identity.
             "labels": dict(spec.labels),
             "modules": [
                 {"name": m.name, "stage": m.stage, **dict(m.identity())} for m in modules
@@ -146,20 +198,59 @@ def compose(
         },
     )
 
-    labels = image_labels(
-        tier="runtime",
-        digest=digest,
-        modules=module_names,
-        extra=spec.labels,
+    # Labels are appended after hashing: stamping the digest into the image must
+    # not change the digest, or the value would be self-referential.
+    body.append(
+        Label(
+            image_labels(
+                tier=tier,
+                digest=digest,
+                modules=module_names,
+                extra={**spec.labels, "dev.jormungandr.parent": parent},
+            )
+        )
     )
-    body.append(Label(labels))
 
-    return ComposedImage(
-        spec=spec,
+    return ComposedLayer(
+        tier=tier,
         dockerfile=render_dockerfile(body),
         context_files=context.files,
         context_modes=context.modes,
         digest=digest,
-        reference=image_reference(spec.repository, digest),
+        reference=image_reference(spec.repository, digest, prefix=tier),
         module_names=module_names,
+        parent=parent,
     )
+
+
+def compose(
+    spec: ImageSpec,
+    *,
+    registry: ModuleRegistry | None = None,
+) -> ComposedImage:
+    """Resolve modules, render each tier, and derive their identities."""
+    modules: tuple[Module, ...] = build_modules(
+        [{"name": d.name, **d.config()} for d in spec.modules],
+        registry=registry,
+    )
+
+    # resolve_order already sorted by (stage, name), so the split is a partition
+    # of an ordered sequence rather than a re-sort.
+    base_modules = [m for m in modules if m.stage <= spec.tier_split]
+    runtime_modules = [m for m in modules if m.stage > spec.tier_split]
+
+    base = _compose_layer(
+        spec=spec,
+        tier=BASE_TIER,
+        parent=spec.base_image,
+        modules=base_modules,
+        include_build_args=True,
+    )
+    runtime = _compose_layer(
+        spec=spec,
+        tier=RUNTIME_TIER,
+        parent=base.reference,
+        modules=runtime_modules,
+        include_build_args=True,
+    )
+    return ComposedImage(spec=spec, layers=(base, runtime))

@@ -46,7 +46,9 @@ def built(tmp_path_factory, docker: DockerCli):
     builder = ImageBuilder(state_dir=tmp_path_factory.mktemp("state"), docker=docker)
     result = builder.build(spec)
     yield result
-    docker.remove_image(result.reference, force=True)
+    # Runtime before base: a base cannot be removed while something is on it.
+    for layer in reversed(result.layers):
+        docker.remove_image(layer.reference, force=True)
 
 
 class TestRealBuild:
@@ -54,10 +56,21 @@ class TestRealBuild:
         assert built.reference.endswith(built.digest)
         assert built.image_id.startswith("sha256:")
 
+    def test_both_tiers_are_built(self, docker: DockerCli, built) -> None:
+        assert [layer.tier for layer in built.layers] == ["base", "runtime"]
+        for layer in built.layers:
+            assert docker.image_exists(layer.reference)
+
+    def test_runtime_is_built_from_the_base(self, docker: DockerCli, built) -> None:
+        base, runtime = built.layers
+        labels = docker.inspect(runtime.reference)["Config"]["Labels"]
+        assert labels["dev.jormungandr.parent"] == base.reference
+
     def test_labels_are_queryable(self, docker: DockerCli, built) -> None:
         labels = docker.inspect(built.reference)["Config"]["Labels"]
         assert labels["dev.jormungandr.managed"] == "true"
         assert labels["dev.jormungandr.digest"] == built.digest
+        assert labels["dev.jormungandr.tier"] == "runtime"
 
     def test_module_side_effect_is_present(self, docker: DockerCli, built) -> None:
         runtime = ContainerRuntime(docker=docker, install_handlers=False)
@@ -90,6 +103,9 @@ class TestRealBuild:
         result = builder.build(spec)
         try:
             assert not result.cached
+            # Only the runtime tier rebuilt; the base was reused as-is.
+            assert result.layers[0].cached
+            assert not result.layers[1].cached
             runtime = ContainerRuntime(docker=docker, install_handlers=False)
             with runtime.session(ContainerSpec(image=result.reference)) as session:
                 assert session.exec(["cat", "/marker"]).stdout.strip() == "changed"

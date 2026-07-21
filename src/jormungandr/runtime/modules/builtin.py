@@ -29,7 +29,7 @@ from jormungandr.runtime.modules.base import BuildContext, ModuleError, Stage
 from jormungandr.runtime.modules.registry import REGISTRY
 
 __all__ = [
-    "AgentCli",
+    "OpenCode",
     "AptPackages",
     "Langfuse",
     "NodeToolchain",
@@ -223,62 +223,61 @@ class PythonToolchain:
         return {"venv": self.venv}
 
 
-class AgentCli:
-    """Install an agent harness CLI from npm.
+class OpenCode:
+    """Install the OpenCode agent harness.
 
-    Versions are pinned by default. An unpinned ``@latest`` would make the image
-    hash lie: the same digest would refer to different software depending on
-    when it was built.
+    OpenCode ships as an npm package whose real payload is a set of
+    platform-specific prebuilt binaries published as optional dependencies
+    (``opencode-linux-arm64``, ``opencode-linux-x64``, and musl/baseline
+    variants). npm resolves the right one for the platform it installs on, so
+    the ordinary global install works on both glibc and musl bases — verified
+    against node:22-bookworm-slim and node:22-alpine.
+
+    The version is pinned by default. An unpinned ``@latest`` would make the
+    image digest lie: the same digest would refer to different software
+    depending on when it happened to be built.
     """
 
     stage = Stage.HARNESS
 
-    KNOWN: Mapping[str, str] = {
-        "claude-code": "@anthropic-ai/claude-code",
-        "codex": "@openai/codex",
-        "gemini": "@google/gemini-cli",
-        "opencode": "opencode-ai",
-    }
+    PACKAGE = "opencode-ai"
+    BINARY = "opencode"
 
     def __init__(
         self,
-        harness: str,
         *,
-        version: str = "latest",
+        version: str = "1.18.4",
         package: str | None = None,
-        name: str | None = None,
+        name: str = "opencode",
         requires: Sequence[str] = ("node",),
     ) -> None:
-        resolved = package or self.KNOWN.get(harness)
-        if resolved is None:
-            known = ", ".join(sorted(self.KNOWN))
-            raise ModuleError(
-                f"unknown harness {harness!r}; known: {known}. "
-                "Pass package=... to install something else."
-            )
-        self.name = name or f"agent-{harness}"
-        self.harness = harness
-        self.package = _safe_token(resolved, what="npm package")
+        self.name = name
+        self.package = _safe_token(package or self.PACKAGE, what="npm package")
         self.version = str(version)
-        _quoted_arg(self.version, what="agent version")
+        _quoted_arg(self.version, what="opencode version")
         self.requires = tuple(requires)
 
     @property
     def spec(self) -> str:
         return f"{self.package}@{self.version}"
 
-    @property
-    def _quoted_spec(self) -> str:
-        return _quoted_arg(self.spec, what="npm install spec")
-
     def instructions(self, context: BuildContext) -> Sequence[Instruction]:
         return [
-            Comment(f"agent harness: {self.harness} ({self.spec})"),
-            Run(f"npm install -g {self._quoted_spec}", mounts=_NPM_CACHE),
+            Comment(f"opencode harness ({self.spec})"),
+            Run(
+                [
+                    f"npm install -g {_quoted_arg(self.spec, what='npm install spec')}",
+                    # Fail the build here rather than at run time: npm exits 0
+                    # even when no optional binary matched the platform, so the
+                    # only proof the install is usable is running it.
+                    f"{self.BINARY} --version",
+                ],
+                mounts=_NPM_CACHE,
+            ),
         ]
 
     def identity(self) -> Mapping[str, object]:
-        return {"harness": self.harness, "package": self.package, "version": self.version}
+        return {"package": self.package, "version": self.version}
 
 
 class Langfuse:
@@ -431,7 +430,7 @@ def register_builtins(registry=REGISTRY) -> None:
         "apt": AptPackages,
         "node": NodeToolchain,
         "python": PythonToolchain,
-        "agent": AgentCli,
+        "opencode": OpenCode,
         "langfuse": Langfuse,
         "script": Script,
         "workspace": Workspace,

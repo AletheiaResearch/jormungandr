@@ -1,7 +1,7 @@
 """The image build pipeline.
 
 Assembles a build context on disk, invokes BuildKit, streams the log, and
-records the result.
+records the result — once per tier, base first.
 
 Two structural choices differ from the prior art:
 
@@ -9,23 +9,24 @@ Two structural choices differ from the prior art:
   build log *into* the context directory and ships it to the daemon on every
   rebuild, and has no ``.dockerignore`` anywhere.
 * A build is skipped when an image carrying the expected digest already exists.
-  Because the digest covers the rendered Dockerfile and every context file,
-  that check is sufficient on its own — there is no mtime comparison (Teich)
-  and no manual force-rebuild flag to remember (SWE-bench).
+  Because the digest covers the rendered Dockerfile, every context file and the
+  parent reference, that check is sufficient on its own — there is no mtime
+  comparison (Teich) and no manual force-rebuild flag to remember (SWE-bench).
 """
 
 from __future__ import annotations
 
 import shutil
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from jormungandr.runtime.compose import ComposedImage, compose
+from jormungandr.runtime.compose import ComposedImage, ComposedLayer, compose
 from jormungandr.runtime.docker import DockerCli, DockerError
 from jormungandr.runtime.spec import ImageSpec
 
-__all__ = ["BuildError", "BuildResult", "ImageBuilder"]
+__all__ = ["BuildError", "BuildResult", "ImageBuilder", "LayerResult"]
+
 
 def _dockerignore(context_files: Sequence[str]) -> str:
     """Deny everything, then allow exactly the declared files.
@@ -61,13 +62,42 @@ class BuildError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class BuildResult:
+class LayerResult:
+    tier: str
     reference: str
     digest: str
     image_id: str
     cached: bool
     log_path: Path
     context_dir: Path
+
+
+@dataclass(frozen=True, slots=True)
+class BuildResult:
+    """Outcome of building every tier of one image."""
+
+    layers: tuple[LayerResult, ...]
+
+    @property
+    def final(self) -> LayerResult:
+        return self.layers[-1]
+
+    @property
+    def reference(self) -> str:
+        return self.final.reference
+
+    @property
+    def digest(self) -> str:
+        return self.final.digest
+
+    @property
+    def image_id(self) -> str:
+        return self.final.image_id
+
+    @property
+    def cached(self) -> bool:
+        """True only when every tier was already present."""
+        return all(layer.cached for layer in self.layers)
 
     @property
     def built(self) -> bool:
@@ -98,32 +128,26 @@ class ImageBuilder:
 
     # -- context ----------------------------------------------------------
 
-    def write_context(self, composed: ComposedImage) -> Path:
-        """Materialize the build context.
+    def write_context(self, layer: ComposedLayer) -> Path:
+        """Materialize a tier's build context.
 
         Rewritten from scratch each time so a stale file from a previous
         composition can never linger in the context.
         """
-        context = self.context_dir(composed.digest)
+        context = self.context_dir(layer.digest)
         if context.exists():
             shutil.rmtree(context)
         context.mkdir(parents=True, exist_ok=True)
 
-        (context / "Dockerfile").write_text(composed.dockerfile, encoding="utf-8")
+        (context / "Dockerfile").write_text(layer.dockerfile, encoding="utf-8")
         (context / ".dockerignore").write_text(
-            _dockerignore(list(composed.context_files)), encoding="utf-8"
+            _dockerignore(list(layer.context_files)), encoding="utf-8"
         )
-
-        for name, content in composed.context_files.items():
+        for name, content in layer.context_files.items():
             target = context / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
-            target.chmod(composed.context_modes.get(name, 0o644))
-
-        # The "is every context file actually COPYed?" check lives in compose(),
-        # where it is a pure property of the spec. Raising it here meant raising
-        # a BuildError that advertised a build log which had not been created
-        # yet — an error pointing at a nonexistent file.
+            target.chmod(layer.context_modes.get(name, 0o644))
         return context
 
     # -- build ------------------------------------------------------------
@@ -136,10 +160,9 @@ class ImageBuilder:
         on_output: Callable[[str], None] | None = None,
         extra_args: Sequence[str] = (),
     ) -> BuildResult:
-        """Build the image described by ``spec``, or skip if it already exists."""
-        composed = compose(spec)
+        """Build every tier of ``spec``, skipping those that already exist."""
         return self.build_composed(
-            composed, force=force, on_output=on_output, extra_args=extra_args
+            compose(spec), force=force, on_output=on_output, extra_args=extra_args
         )
 
     def build_composed(
@@ -151,33 +174,57 @@ class ImageBuilder:
         extra_args: Sequence[str] = (),
     ) -> BuildResult:
         self.docker.require()
-        digest = composed.digest
-        log_path = self.log_path(digest)
+        results: list[LayerResult] = []
+        for layer in composed.layers:
+            results.append(
+                self._build_layer(
+                    layer,
+                    platform=composed.spec.target_platform,
+                    build_args=composed.spec.build_args,
+                    force=force,
+                    on_output=on_output,
+                    extra_args=extra_args,
+                )
+            )
+        return BuildResult(layers=tuple(results))
+
+    def _build_layer(
+        self,
+        layer: ComposedLayer,
+        *,
+        platform: str,
+        build_args: dict[str, str],
+        force: bool,
+        on_output: Callable[[str], None] | None,
+        extra_args: Sequence[str],
+    ) -> LayerResult:
+        log_path = self.log_path(layer.digest)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if not force and self.docker.image_exists(composed.reference):
-            return BuildResult(
-                reference=composed.reference,
-                digest=digest,
-                image_id=self.docker.image_digest(composed.reference),
+        if not force and self.docker.image_exists(layer.reference):
+            return LayerResult(
+                tier=layer.tier,
+                reference=layer.reference,
+                digest=layer.digest,
+                image_id=self.docker.image_digest(layer.reference),
                 cached=True,
                 log_path=log_path,
-                context_dir=self.context_dir(digest),
+                context_dir=self.context_dir(layer.digest),
             )
 
-        context = self.write_context(composed)
+        context = self.write_context(layer)
         args = [
             "build",
             "--platform",
-            composed.spec.target_platform,
+            platform,
             "--tag",
-            composed.reference,
+            layer.reference,
             "--progress",
             "plain",
         ]
         if force:
             args.append("--no-cache")
-        for key, value in sorted(composed.spec.build_args.items()):
+        for key, value in sorted(build_args.items()):
             args += ["--build-arg", f"{key}={value}"]
         args.extend(extra_args)
         args.append(str(context))
@@ -186,7 +233,7 @@ class ImageBuilder:
             log.write(f"$ docker {' '.join(args)}\n\n")
             # Echo the generated Dockerfile before running it: when a build
             # fails, the exact input is the first thing anyone needs.
-            log.write(composed.dockerfile)
+            log.write(layer.dockerfile)
             log.write("\n" + "-" * 70 + "\n")
             log.flush()
             try:
@@ -196,12 +243,13 @@ class ImageBuilder:
                         on_output(line)
             except DockerError as exc:
                 log.write(f"\nBUILD FAILED: {exc}\n")
-                raise BuildError(composed.reference, log_path, str(exc)) from exc
+                raise BuildError(layer.reference, log_path, str(exc)) from exc
 
-        return BuildResult(
-            reference=composed.reference,
-            digest=digest,
-            image_id=self.docker.image_digest(composed.reference),
+        return LayerResult(
+            tier=layer.tier,
+            reference=layer.reference,
+            digest=layer.digest,
+            image_id=self.docker.image_digest(layer.reference),
             cached=False,
             log_path=log_path,
             context_dir=context,
@@ -219,10 +267,18 @@ class ImageBuilder:
         Only ever touches images carrying our label, so a user's unrelated
         images cannot be collected. SWE-bench classifies by name prefix and
         will happily delete anything that happens to share it.
+
+        Runtime images are removed before base images, since a base cannot be
+        deleted while something is built on it.
         """
         preserved = set(keep)
         removed: list[str] = []
-        for image in self.managed_images():
+        images = self.managed_images()
+
+        def tier_of(image: dict[str, str]) -> int:
+            return 0 if str(image.get("Tag", "")).startswith("base-") else 1
+
+        for image in sorted(images, key=tier_of, reverse=True):
             reference = f"{image.get('Repository')}:{image.get('Tag')}"
             if reference in preserved:
                 continue

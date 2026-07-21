@@ -114,6 +114,22 @@ class ImageSpec(BaseModel):
     build_args: dict[str, str] = Field(default_factory=dict)
     labels: dict[str, str] = Field(default_factory=dict)
 
+    tier_split: int = Field(default=20)
+    """Highest module stage that belongs to the base tier (default: TOOLCHAIN).
+
+    Modules at or below this stage are baked into a separate, independently
+    tagged base image; everything above goes in the runtime image built FROM it.
+
+    The split exists for cold machines and shared registries. Within one
+    machine, emitting instructions in rate-of-change order already lets
+    BuildKit's layer cache skip the expensive prefix — but that cache is local
+    and evictable, so a fresh CI runner or a `docker builder prune` rebuilds
+    everything. A separately tagged base image can be pulled instead.
+
+    Set above USER (50) to put everything in the base tier; set below SYSTEM
+    (10) to put everything in the runtime tier.
+    """
+
     @field_validator("target_platform")
     @classmethod
     def _validate_platform(cls, value: str) -> str:
