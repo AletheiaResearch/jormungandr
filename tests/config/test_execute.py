@@ -1,0 +1,319 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from jormungandr.config import load_config
+from jormungandr.config.prompts import PromptRecord
+from jormungandr.execute import ExecutionError, execute
+from jormungandr.runtime.docker import CommandResult
+from jormungandr.runtime.run import HarnessRun, TurnResult
+
+CONFIG = """
+version: 1
+providers:
+  openrouter:
+    kind: openai-compatible
+    base_url: https://openrouter.ai/api/v1
+    api_key: ${OPENROUTER_API_KEY}
+    models:
+      deepseek: deepseek/deepseek-v4-flash
+harness:
+  name: droid
+  model: openrouter/deepseek
+prompts:
+  file: ./prompts.jsonl
+output:
+  dir: ./runs
+"""
+
+
+class FakeBuild:
+    reference = "img:runtime-abc"
+    cached = True
+
+
+class FakeBuilder:
+    def __init__(self) -> None:
+        self.built: list = []
+
+    def build(self, spec):
+        self.built.append(spec)
+        return FakeBuild()
+
+
+class FakeRunner:
+    """Records what it was asked to run; fabricates plausible results."""
+
+    def __init__(self, *, fail_ids: set[str] | None = None) -> None:
+        self.calls: list[dict] = []
+        self.fail_ids = fail_ids or set()
+
+    def run(self, *, harness, image, prompts, timeout=None, container_spec=None,
+            collect_state_to=None, **kwargs):
+        self.calls.append(
+            {
+                "harness": harness,
+                "image": image,
+                "prompts": list(prompts),
+                "timeout": timeout,
+                "spec": container_spec,
+                "collect": collect_state_to,
+            }
+        )
+        failing = any(p in self.fail_ids for p in prompts)
+        turns = tuple(
+            TurnResult.from_command(
+                i, p, CommandResult(3 if failing else 0, f"out:{p}", "", 0.1)
+            )
+            for i, p in enumerate(prompts)
+        )
+        return HarnessRun(
+            harness=harness,
+            image=image,
+            turns=turns,
+            state_paths=(".factory/sessions",),
+            artifacts=collect_state_to,
+        )
+
+
+@pytest.fixture
+def project(tmp_path: Path) -> Path:
+    (tmp_path / "jorm.yaml").write_text(CONFIG)
+    (tmp_path / "prompts.jsonl").write_text(
+        '{"id":"a","prompt":"first"}\n'
+        '{"id":"b","prompt":"one","follow_up_prompts":["two"]}\n'
+    )
+    return tmp_path
+
+
+def load(project: Path):
+    return load_config(project / "jorm.yaml", apply_env=False)
+
+
+ENV = {"OPENROUTER_API_KEY"}
+
+
+class TestPreflight:
+    def test_missing_env_stops_before_building(self, project: Path) -> None:
+        # A full image build and N container starts, only to hit a 401, is a
+        # bad way to learn a variable is unset.
+        builder = FakeBuilder()
+        with pytest.raises(ExecutionError, match="OPENROUTER_API_KEY"):
+            execute(load(project), builder=builder, runner=FakeRunner(), available_env=set())
+        assert builder.built == []
+
+    def test_env_file_satisfies_the_requirement(self, project: Path) -> None:
+        secrets = project / "secrets.env"
+        secrets.write_text("# comment\nOPENROUTER_API_KEY=sk-whatever\n")
+        (project / "jorm.yaml").write_text(
+            CONFIG.replace("output:", f"run:\n  env_files: [{secrets}]\noutput:")
+        )
+        report = execute(
+            load(project), builder=FakeBuilder(), runner=FakeRunner(), available_env=set()
+        )
+        assert report.ok
+
+    def test_empty_prompt_set_is_an_error(self, project: Path) -> None:
+        with pytest.raises(ExecutionError, match="no prompt records"):
+            execute(
+                load(project),
+                records=[],
+                builder=FakeBuilder(),
+                runner=FakeRunner(),
+                available_env=ENV,
+            )
+
+
+class TestExecute:
+    def run_it(self, project: Path, **kwargs):
+        return execute(
+            load(project),
+            builder=kwargs.pop("builder", FakeBuilder()),
+            runner=kwargs.pop("runner", FakeRunner()),
+            available_env=ENV,
+            **kwargs,
+        )
+
+    def test_builds_once_and_runs_every_record(self, project: Path) -> None:
+        builder, runner = FakeBuilder(), FakeRunner()
+        report = self.run_it(project, builder=builder, runner=runner)
+        assert len(builder.built) == 1
+        assert len(runner.calls) == 2
+        assert report.ok
+
+    def test_multi_turn_records_pass_every_turn(self, project: Path) -> None:
+        runner = FakeRunner()
+        self.run_it(project, runner=runner)
+        by_first = {c["prompts"][0]: c["prompts"] for c in runner.calls}
+        assert by_first["one"] == ["one", "two"]
+
+    def test_results_keep_input_order(self, project: Path) -> None:
+        # Completion order is arbitrary; a report that reorders itself between
+        # runs cannot be diffed.
+        report = self.run_it(project)
+        assert [r.id for r in report.results] == ["a", "b"]
+
+    def test_per_record_directories_and_summaries(self, project: Path) -> None:
+        report = self.run_it(project)
+        for result in report.results:
+            assert result.directory.name == result.id
+            summary = json.loads((result.directory / "result.json").read_text())
+            assert summary["id"] == result.id
+            assert summary["ok"] is True
+
+    def test_raw_output_is_written_beside_the_summary(self, project: Path) -> None:
+        report = self.run_it(project)
+        first = report.results[0].directory
+        assert (first / "turn-0.stdout.txt").read_text() == "out:first"
+
+    def test_report_json_is_written(self, project: Path) -> None:
+        report = self.run_it(project)
+        payload = json.loads((report.output_dir / "report.json").read_text())
+        assert payload["total"] == 2
+        assert sorted(payload["succeeded"]) == ["a", "b"]
+
+    def test_a_failing_record_does_not_stop_the_others(self, project: Path) -> None:
+        report = self.run_it(project, runner=FakeRunner(fail_ids={"first"}))
+        assert not report.ok
+        assert [r.id for r in report.failed] == ["a"]
+        assert [r.id for r in report.succeeded] == ["b"]
+
+    def test_a_crashing_runner_is_recorded_not_raised(self, project: Path) -> None:
+        class Exploding(FakeRunner):
+            def run(self, **kwargs):
+                raise RuntimeError("daemon went away")
+
+        report = self.run_it(project, runner=Exploding())
+        assert not report.ok
+        assert all("daemon went away" in (r.error or "") for r in report.results)
+        summary = json.loads((report.results[0].directory / "result.json").read_text())
+        assert summary["ok"] is False
+
+    def test_state_collection_is_requested(self, project: Path) -> None:
+        runner = FakeRunner()
+        self.run_it(project, runner=runner)
+        assert all(c["collect"] is not None for c in runner.calls)
+
+    def test_state_collection_can_be_disabled(self, project: Path) -> None:
+        (project / "jorm.yaml").write_text(CONFIG + "  collect_state: false\n")
+        runner = FakeRunner()
+        self.run_it(project, runner=runner)
+        assert all(c["collect"] is None for c in runner.calls)
+
+    def test_progress_callback_fires_per_record(self, project: Path) -> None:
+        seen: list[str] = []
+        self.run_it(project, on_progress=lambda r: seen.append(r.id))
+        assert sorted(seen) == ["a", "b"]
+
+    def test_run_settings_reach_the_container_spec(self, project: Path) -> None:
+        (project / "jorm.yaml").write_text(
+            CONFIG.replace("output:", "run:\n  network: none\n  cpus: 8\noutput:")
+        )
+        runner = FakeRunner()
+        self.run_it(project, runner=runner)
+        spec = runner.calls[0]["spec"]
+        assert spec.network == "none"
+        assert spec.limits.cpus == 8
+
+
+class TestWorkspaces:
+    def test_local_workspace_is_copied_not_mounted_in_place(
+        self, project: Path, tmp_path: Path
+    ) -> None:
+        # An agent handed a bind mount edits the caller's source tree, and a run
+        # that mutates its own inputs cannot be repeated.
+        source = tmp_path / "src"
+        source.mkdir()
+        (source / "file.txt").write_text("original")
+        record = PromptRecord(
+            id="w", prompt="x", workspace={"type": "local", "path": str(source)}
+        )
+        runner = FakeRunner()
+        report = execute(
+            load(project),
+            records=[record],
+            builder=FakeBuilder(),
+            runner=runner,
+            available_env=ENV,
+        )
+        copied = report.results[0].directory / "workspace" / "file.txt"
+        assert copied.read_text() == "original"
+        assert copied.resolve() != (source / "file.txt").resolve()
+        assert any("/workspace" in m for m in runner.calls[0]["spec"].mounts)
+
+    def test_missing_local_workspace_fails_that_record_only(self, project: Path) -> None:
+        record = PromptRecord(
+            id="w", prompt="x", workspace={"type": "local", "path": "/nope/missing"}
+        )
+        report = execute(
+            load(project),
+            records=[record],
+            builder=FakeBuilder(),
+            runner=FakeRunner(),
+            available_env=ENV,
+        )
+        assert not report.ok
+        assert "not a directory" in (report.results[0].error or "")
+
+    def test_no_workspace_means_no_mount(self, project: Path) -> None:
+        runner = FakeRunner()
+        self.__class__  # noqa: B018
+        execute(
+            load(project),
+            records=[PromptRecord(id="w", prompt="x")],
+            builder=FakeBuilder(),
+            runner=runner,
+            available_env=ENV,
+        )
+        assert runner.calls[0]["spec"].mounts == ()
+
+
+class TestOverrides:
+    def test_timeout_override_wins(self, project: Path) -> None:
+        runner = FakeRunner()
+        execute(
+            load(project),
+            records=[PromptRecord(id="w", prompt="x", overrides={"timeout": 42})],
+            builder=FakeBuilder(),
+            runner=runner,
+            available_env=ENV,
+        )
+        assert runner.calls[0]["timeout"] == 42
+
+    def test_run_timeout_is_the_default(self, project: Path) -> None:
+        runner = FakeRunner()
+        execute(
+            load(project),
+            records=[PromptRecord(id="w", prompt="x")],
+            builder=FakeBuilder(),
+            runner=runner,
+            available_env=ENV,
+        )
+        assert runner.calls[0]["timeout"] == 900.0
+
+    def test_max_turns_truncates(self, project: Path) -> None:
+        runner = FakeRunner()
+        execute(
+            load(project),
+            records=[
+                PromptRecord(
+                    id="w",
+                    prompt="one",
+                    follow_up_prompts=["two", "three"],
+                    overrides={"max_turns": 2},
+                )
+            ],
+            builder=FakeBuilder(),
+            runner=runner,
+            available_env=ENV,
+        )
+        assert runner.calls[0]["prompts"] == ["one", "two"]
+
+    def test_no_per_record_model_override_exists(self) -> None:
+        # Model selection is baked into the image, so varying it per record
+        # would mean an image per record. Compare models by running twice.
+        with pytest.raises(Exception):
+            PromptRecord(id="w", prompt="x", overrides={"model": "other/model"})

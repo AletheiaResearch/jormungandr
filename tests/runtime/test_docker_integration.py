@@ -430,3 +430,122 @@ image:
         with runtime.session(ContainerSpec(image=built.reference)) as session:
             result = session.shell('mkdir -p "$HOME/.factory/sessions" && echo ok')
         assert result.ok and "ok" in result.stdout
+
+
+class TestExecuteEndToEnd:
+    """config file -> image -> containers -> results on disk.
+
+    The real droid module installs, so the config->image path is genuinely
+    exercised; a stub binary then shadows it at the USER stage so the test
+    needs no credentials and no inference. What is under test is the
+    orchestration.
+    """
+
+    STUB = (
+        "#!/bin/sh\n"
+        'prompt="$(cat)"\n'
+        'mkdir -p "$HOME/.factory/sessions"\n'
+        'printf "%s\\n" "$prompt" >> "$HOME/.factory/sessions/log.txt"\n'
+        'printf "handled: %s\\n" "$prompt"\n'
+        '[ "$prompt" = "BOOM" ] && exit 5\n'
+        "exit 0\n"
+    )
+
+    @pytest.fixture
+    @staticmethod
+    def project(tmp_path: Path):
+        install_stub = (
+            "printf %s " + shlex.quote(TestExecuteEndToEnd.STUB)
+            + " > /usr/local/bin/droid && chmod +x /usr/local/bin/droid"
+        )
+        config = {
+            "version": 1,
+            "providers": {
+                "local": {
+                    "kind": "openai-compatible",
+                    "base_url": "http://127.0.0.1:9099/v1",
+                    "api_key": "${STUB_API_KEY}",
+                    "models": {"m": "my-model"},
+                }
+            },
+            "harness": {"name": "droid", "model": "local/m"},
+            "prompts": {"file": "./prompts.jsonl"},
+            "image": {
+                "base_image": "node:22-bookworm-slim",
+                "repository": "jormungandr-e2e",
+                "modules": [
+                    {"name": "node", "preinstalled": True},
+                    {"name": "script", "content": install_stub},
+                ],
+            },
+            "run": {"concurrency": 2, "timeout": 120},
+            "output": {"dir": "./runs"},
+        }
+        (tmp_path / "jorm.yaml").write_text(json.dumps(config))  # JSON is valid YAML
+        (tmp_path / "prompts.jsonl").write_text(
+            '{"id":"alpha","prompt":"first"}\n'
+            '{"id":"beta","prompt":"one","follow_up_prompts":["two"]}\n'
+            '{"id":"gamma","prompt":"BOOM"}\n'
+        )
+        return tmp_path
+
+    def test_full_run(self, project, docker: DockerCli, tmp_path_factory) -> None:
+        from jormungandr.config import load_config
+        from jormungandr.config.loading import compile_image_spec
+        from jormungandr.execute import execute
+        from jormungandr.runtime.build import ImageBuilder
+        from jormungandr.runtime.compose import compose
+        from jormungandr.runtime.run import PromptRunner
+
+        config = load_config(project / "jorm.yaml", apply_env=False)
+        composed = compose(compile_image_spec(config))
+        builder = ImageBuilder(state_dir=tmp_path_factory.mktemp("state"), docker=docker)
+        runner = PromptRunner(
+            runtime=ContainerRuntime(docker=docker, install_handlers=False)
+        )
+        try:
+            report = execute(
+                config, builder=builder, runner=runner, available_env={"STUB_API_KEY"}
+            )
+
+            # every record ran, in input order
+            assert [r.id for r in report.results] == ["alpha", "beta", "gamma"]
+
+            # a failing record fails alone
+            assert [r.id for r in report.failed] == ["gamma"]
+            assert report.results[2].turns[0].exit_code == 5
+
+            # multi-turn reached the harness in order, in one session
+            beta = report.results[1].directory
+            assert "handled: one" in (beta / "turn-0.stdout.txt").read_text()
+            assert "handled: two" in (beta / "turn-1.stdout.txt").read_text()
+
+            # summaries on disk
+            summary = json.loads((beta / "result.json").read_text())
+            assert summary["ok"] is True and len(summary["turns"]) == 2
+            overall = json.loads((report.output_dir / "report.json").read_text())
+            assert overall["failed"] == ["gamma"]
+            assert overall["total"] == 3
+
+            # the harness's own session record came back out of the container
+            collected = list((beta / "state").rglob("log.txt"))
+            assert collected, sorted(str(p) for p in (beta / "state").rglob("*"))
+            body = collected[0].read_text()
+            assert "one" in body and "two" in body
+
+            # the baked provider config is present and credential-free
+            baked = json.loads(composed.runtime.context_files["droid.config.json"])
+            assert baked["customModels"][0]["apiKey"] == "${STUB_API_KEY}"
+        finally:
+            for layer in reversed(composed.layers):
+                docker.remove_image(layer.reference, force=True)
+
+    def test_missing_env_stops_before_any_container(self, project, docker) -> None:
+        from jormungandr.config import load_config
+        from jormungandr.execute import ExecutionError, execute
+
+        config = load_config(project / "jorm.yaml", apply_env=False)
+        before = len(docker.list_containers())
+        with pytest.raises(ExecutionError, match="STUB_API_KEY"):
+            execute(config, available_env=set())
+        assert len(docker.list_containers()) == before
