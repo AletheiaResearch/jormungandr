@@ -59,17 +59,37 @@ class TestHelp:
         assert cli("--version").returncode == 0
 
     def test_help_does_not_import_docker_machinery(self) -> None:
-        # cli.py is declarations only; command bodies import lazily so --help
-        # stays fast and works without a daemon.
+        # Checks the path main() actually takes, not just `import cli`.
+        # install_error_handler used to import the runtime error types eagerly,
+        # so every invocation — including --help — dragged in the docker stack
+        # while a test that only imported cli.py still passed.
         probe = (
-            "import sys; import jormungandr.cli; "
-            "print('jormungandr.execute' in sys.modules, "
-            "'jormungandr.runtime.build' in sys.modules)"
+            "import sys, jormungandr.cli; "
+            "from jormungandr.cli_helpers import install_error_handler; "
+            "install_error_handler(); "
+            "print(sorted(m for m in sys.modules if m.startswith('jormungandr.') "
+            "and ('runtime' in m or m.endswith('execute'))))"
         )
         out = subprocess.run(
             [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
         ).stdout
-        assert out.strip() == "False False"
+        assert out.strip() == "[]", f"eagerly imported: {out.strip()}"
+
+    def test_runtime_errors_still_print_cleanly(self, tmp_path: Path) -> None:
+        # The lazy resolution must not lose the clean-error behaviour it
+        # exists to provide.
+        probe = (
+            "from jormungandr.cli_helpers import install_error_handler; "
+            "install_error_handler(); "
+            "from jormungandr.execute import ExecutionError; "
+            "raise ExecutionError('boom')"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
+        )
+        assert result.returncode == 1
+        assert "error: boom" in result.stderr
+        assert "Traceback" not in result.stderr
 
 
 class TestCheck:

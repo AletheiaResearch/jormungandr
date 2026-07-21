@@ -224,7 +224,17 @@ class ContainerRuntime:
             with self._lock:
                 self._live[container_id] = session
         if start:
-            self.docker.start(container_id)
+            try:
+                self.docker.start(container_id)
+            except Exception:
+                # The container exists but never ran. An untracked one is
+                # invisible to shutdown(), and a tracked one is only reaped at
+                # exit — either way it lingers, so remove it now and let the
+                # failure propagate.
+                session.remove()
+                with self._lock:
+                    self._live.pop(container_id, None)
+                raise
         return session
 
     def release(self, session: ContainerSession) -> None:
@@ -303,8 +313,15 @@ class ContainerRuntime:
     # -- reaping ----------------------------------------------------------
 
     def managed_containers(self) -> list[dict[str, str]]:
-        """Containers this tool created, found by label rather than by name."""
-        return self.docker.list_containers(label=f"{MANAGED_LABEL}=true")
+        """Containers this tool created.
+
+        Filtered on the *session* label, not ``managed``. A container inherits
+        its image's labels, so anything a user runs from a jormungandr-built
+        image carries ``managed=true`` too and would be swept. The session
+        label is written at container-create time and cannot come from an
+        image, so it identifies containers we actually started.
+        """
+        return self.docker.list_containers(label=f"{SESSION_LABEL}")
 
     def reap_orphans(self, *, owner: str | None = None, all_owners: bool = False) -> list[str]:
         """Remove managed containers left behind by dead processes.

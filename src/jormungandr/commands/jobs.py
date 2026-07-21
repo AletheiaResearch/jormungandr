@@ -143,6 +143,23 @@ def run(
     records = resolve_prompts(config)
     total = len(records)
 
+    # Before building: a missing key would otherwise be discovered after a full
+    # image build, which is the slow part.
+    import os
+
+    from jormungandr.execute import ExecutionError, env_file_names
+
+    available = set(os.environ)
+    for path in config.run.env_files:
+        available |= env_file_names(Path(path))
+    missing = config.missing_env(available)
+    if missing:
+        raise ExecutionError(
+            "missing environment variable(s) referenced by providers: "
+            + ", ".join(sorted(missing))
+            + ". Supply them in the environment or in run.env_files."
+        )
+
     from jormungandr.config.loading import compile_image_spec
     from jormungandr.runtime.build import ImageBuilder
 

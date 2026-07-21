@@ -42,29 +42,37 @@ def install_error_handler() -> None:
     if os.environ.get("JORMUNGANDR_TRACEBACK"):
         return
 
-    # ExecutionError and the docker errors are RuntimeErrors, so they are
-    # named explicitly rather than catching RuntimeError wholesale — a genuine
-    # internal bug should still produce a traceback.
-    from jormungandr.execute import ExecutionError
-    from jormungandr.runtime.build import BuildError
-    from jormungandr.runtime.docker import DockerError
+    always = (MissingExtra, FileNotFoundError, PermissionError, ValueError)
 
-    expected = (
-        MissingExtra,
-        FileNotFoundError,
-        PermissionError,
-        ValueError,
-        ExecutionError,
-        BuildError,
-        DockerError,
-    )
+    def _expected() -> tuple[type[BaseException], ...]:
+        """Resolve the runtime error types only once something has failed.
+
+        ExecutionError, BuildError and DockerError are RuntimeErrors, so they
+        must be named explicitly rather than catching RuntimeError wholesale —
+        a genuine internal bug should still produce a traceback. But importing
+        them at install time would drag the whole docker stack into every
+        invocation, including `--help`, which is exactly what keeping cli.py to
+        declarations was meant to avoid. Nothing has failed yet at install
+        time, so nothing needs importing yet.
+        """
+        extra: list[type[BaseException]] = []
+        for module, name in (
+            ("jormungandr.execute", "ExecutionError"),
+            ("jormungandr.runtime.build", "BuildError"),
+            ("jormungandr.runtime.docker", "DockerError"),
+        ):
+            try:
+                extra.append(getattr(import_module(module), name))
+            except Exception:  # noqa: BLE001 - reporting must not itself fail
+                continue
+        return always + tuple(extra)
 
     def hook(exc_type, exc, tb):
         if issubclass(exc_type, KeyboardInterrupt):
             raise SystemExit(130)
         if issubclass(exc_type, BrokenPipeError):
             raise SystemExit(0)
-        if issubclass(exc_type, expected):
+        if issubclass(exc_type, _expected()):
             print(f"error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         sys.__excepthook__(exc_type, exc, tb)

@@ -59,13 +59,20 @@ def _resolve_paths(data: dict[str, Any], base: Path) -> None:
     and leaves output directories relative to the process CWD, so running with
     a config from another directory writes output to the wrong place.
     """
-    for section, key in (
-        ("prompts", "file"),
-        ("output", "dir"),
+    for section, key, default in (
+        ("prompts", "file", None),
+        ("output", "dir", "./runs"),
     ):
         block = data.get(section)
-        if isinstance(block, dict) and block.get(key) is not None:
-            block[key] = str((base / str(block[key])).resolve())
+        if block is None and default is not None:
+            # An omitted block still has a default path, and leaving it
+            # unresolved makes it relative to the process CWD — so the same
+            # config writes somewhere else depending on where it was invoked.
+            block = data.setdefault(section, {})
+        if isinstance(block, dict):
+            value = block.get(key, default)
+            if value is not None:
+                block[key] = str((base / str(value)).resolve())
 
     run = data.get("run")
     if isinstance(run, dict) and run.get("env_files"):
@@ -156,7 +163,16 @@ def compile_image_spec(config: JormConfig) -> Any:
 
     modules.append(declaration)
     if "workdir" not in declared:
-        modules.append({"name": "workdir"})
+        # Follow whatever user the `user` module declares. Defaulting to
+        # "agent" while the user module created someone else produces a
+        # Dockerfile whose chown and USER name an account that does not exist.
+        user_module = next(
+            (m for m in config.image.modules if m.get("name") == "user"), {}
+        )
+        workdir: dict[str, Any] = {"name": "workdir"}
+        if user_module.get("user"):
+            workdir["user"] = user_module["user"]
+        modules.append(workdir)
 
     return ImageSpec(
         base_image=config.image.base_image,

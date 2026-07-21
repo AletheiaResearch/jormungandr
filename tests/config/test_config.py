@@ -525,3 +525,93 @@ class TestGitSource:
     def test_unknown_git_key_rejected(self) -> None:
         with pytest.raises(ValidationError):
             PromptRecord(prompt="x", git={"clone_url": "u", "branch": "main"})
+
+
+class TestRecordIdSafety:
+    """Ids become directory names, so they must be one safe path component.
+
+    `output_dir / record.id` with an absolute id discards output_dir entirely,
+    and `..` escapes upward — into the rmtree that clears a record's workspace
+    before each run. That is arbitrary deletion driven by a data file.
+    """
+
+    @pytest.mark.parametrize(
+        "bad", ["../../escape", "/abs/path", "a/b", ".", "..", "", "   ", "-leading"]
+    )
+    def test_unsafe_ids_are_rejected(self, bad: str) -> None:
+        with pytest.raises(ValidationError):
+            PromptRecord(prompt="x", id=bad)
+
+    @pytest.mark.parametrize("good", ["alpha", "a-1", "a_1.v2", "A9", "0001"])
+    def test_ordinary_ids_are_accepted(self, good: str) -> None:
+        assert PromptRecord(prompt="x", id=good).id == good
+
+    def test_an_unsafe_id_in_a_file_is_reported_with_its_line(self, tmp_path: Path) -> None:
+        path = tmp_path / "p.jsonl"
+        path.write_text('{"prompt":"ok"}\n{"id":"../../boom","prompt":"x"}\n')
+        with pytest.raises(ValueError, match="line 2"):
+            load_prompts(path)
+
+    def test_derived_ids_are_always_safe(self, tmp_path: Path) -> None:
+        path = tmp_path / "p.jsonl"
+        path.write_text('{"prompt":"a"}\n{"prompt":"b"}\n')
+        for record in load_prompts(path):
+            assert PromptRecord(prompt="x", id=record.id).id == record.id
+
+
+class TestReviewRegressions:
+    def test_output_dir_resolves_even_when_the_block_is_omitted(
+        self, tmp_path: Path
+    ) -> None:
+        # An omitted block still has a default path; leaving it unresolved
+        # makes it relative to the process CWD, so the same config writes
+        # somewhere else depending on where it was invoked.
+        (tmp_path / "jorm.yaml").write_text(
+            BASE_CONFIG.replace("prompts:\n  file: ./prompts.jsonl\n",
+                                "prompts:\n  file: ./prompts.jsonl\n")
+        )
+        (tmp_path / "prompts.jsonl").write_text('{"prompt":"x"}\n')
+        config = load_config(tmp_path / "jorm.yaml", apply_env=False)
+        assert config.output.dir.is_absolute()
+        assert config.output.dir == (tmp_path / "runs").resolve()
+
+    def test_a_custom_user_module_reaches_the_workdir(self, project: Path) -> None:
+        # Defaulting workdir to "agent" while the user module created someone
+        # else produces a Dockerfile whose chown and USER name an account that
+        # does not exist.
+        from jormungandr.config.loading import compile_image_spec
+
+        (project / "jorm.yaml").write_text(
+            BASE_CONFIG.replace(
+                "prompts:",
+                "image:\n  modules:\n    - {name: user, user: runner}\nprompts:",
+            )
+        )
+        spec = compile_image_spec(load_config(project / "jorm.yaml", apply_env=False))
+        workdir = next(m for m in spec.modules if m.name == "workdir")
+        assert workdir.config()["user"] == "runner"
+        rendered = compose(spec).runtime.dockerfile
+        assert "USER runner" in rendered
+
+    def test_a_literal_credential_is_not_echoed_in_the_message(self) -> None:
+        # Reporting a leaked key must not print the key.
+        secret = "sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789"
+        with pytest.raises(ValidationError) as excinfo:
+            ProviderSpec(base_url="https://h/v1", api_key=secret, models={"a": "b"})
+        message = str(excinfo.value)
+        # pydantic echoes the input separately; our own text must not add it.
+        assert "abcdefghijklmnop" not in message.split("input_value")[0]
+
+    def test_opencode_limits_are_emitted_without_context_window(self) -> None:
+        # The schema requires both keys, so a partial limit is invalid — but
+        # emitting none leaves context accounting broken with no hint why.
+        from jormungandr.runtime.modules.builtin import OpenCode
+
+        providers = {
+            "p": ProviderSpec(
+                base_url="https://h/v1", api_key="${K}", models={"m": "up"}
+            )
+        }
+        document = OpenCode.translate_providers(providers, "p/m")
+        limit = document["provider"]["p"]["models"]["up"]["limit"]
+        assert limit["context"] and limit["output"]

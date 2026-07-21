@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import shlex
 import socket
+import subprocess
 import sys
 import uuid
 
@@ -550,3 +551,89 @@ class TestExecuteEndToEnd:
         with pytest.raises(ExecutionError, match="STUB_API_KEY"):
             execute(config, available_env=set())
         assert len(docker.list_containers()) == before
+
+
+class TestPruneDoesNotEatDerivedImages:
+    """Docker propagates a parent image's LABELs into any child.
+
+    A user image built FROM one of ours therefore carries
+    dev.jormungandr.managed=true and was force-deleted by prune — while the
+    docstring, CLI help and README all promised that could not happen.
+    """
+
+    def test_a_derived_user_image_survives_prune(
+        self, docker: DockerCli, tmp_path
+    ) -> None:
+        from jormungandr.runtime.build import ImageBuilder
+        from jormungandr.runtime.compose import compose
+        from jormungandr.runtime.spec import ImageSpec
+
+        spec = ImageSpec(
+            base_image="alpine:3.20",
+            repository="jormungandr-prunetest",
+            modules=[{"name": "script", "content": "true"}],
+        )
+        composed = compose(spec)
+        builder = ImageBuilder(state_dir=tmp_path / "state", docker=docker)
+        built = builder.build(spec)
+
+        context = tmp_path / "derived"
+        context.mkdir()
+        (context / "Dockerfile").write_text(
+            f"FROM {built.reference}\nRUN true\n"
+        )
+        derived = "mycompany-precious/app:v1"
+        subprocess.run(
+            ["docker", "build", "-q", "-t", derived, str(context)],
+            check=True, capture_output=True, text=True, timeout=600,
+        )
+        try:
+            # The label really is inherited — otherwise this test proves nothing.
+            assert docker.image_label(derived, "dev.jormungandr.managed") == "true"
+            listed = {
+                f"{i.get('Repository')}:{i.get('Tag')}"
+                for i in docker.list_images(label="dev.jormungandr.managed=true")
+            }
+            assert derived in listed, "precondition: raw label filter matches it"
+
+            # ...but managed_images must not claim it, because its inherited
+            # digest label cannot match the digest in its own tag.
+            ours = {
+                f"{i.get('Repository')}:{i.get('Tag')}" for i in builder.managed_images()
+            }
+            assert derived not in ours
+            assert built.reference in ours
+
+            # prune() is global, so preserve anything that existed before this
+            # test — otherwise it deletes the module-scoped fixture image other
+            # tests depend on.
+            preserve = tuple(
+                f"{i.get('Repository')}:{i.get('Tag')}"
+                for i in builder.managed_images()
+                if f"{i.get('Repository')}:{i.get('Tag')}" != built.reference
+            )
+            removed = builder.prune(keep=preserve)
+            assert derived not in removed
+            assert docker.image_exists(derived), "prune deleted a user-owned image"
+        finally:
+            docker.remove_image(derived, force=True)
+            for layer in reversed(composed.layers):
+                docker.remove_image(layer.reference, force=True)
+
+    def test_a_user_container_from_a_derived_image_is_not_reaped(
+        self, docker: DockerCli, built
+    ) -> None:
+        # Containers inherit image labels too, so `managed` alone matched a
+        # container the user started themselves.
+        name = f"jorm-user-owned-{uuid.uuid4().hex[:8]}"
+        subprocess.run(
+            ["docker", "create", "--name", name, built.reference, "sleep", "5"],
+            check=True, capture_output=True, text=True, timeout=120,
+        )
+        try:
+            runtime = ContainerRuntime(docker=docker, install_handlers=False)
+            names = {c.get("Names") for c in runtime.managed_containers()}
+            assert name not in names, "a user's own container looked like ours"
+            assert name not in runtime.reap_orphans(all_owners=True)
+        finally:
+            docker.remove_container(name, force=True)

@@ -394,13 +394,15 @@ class OpenCode(Harness):
             models: dict[str, object] = {}
             for alias, upstream in provider.models.items():  # type: ignore[attr-defined]
                 entry: dict[str, object] = {"name": alias}
-                limit: dict[str, int] = {}
-                if provider.context_window:  # type: ignore[attr-defined]
-                    limit["context"] = provider.context_window  # type: ignore[attr-defined]
-                if provider.max_output_tokens:  # type: ignore[attr-defined]
-                    limit["output"] = provider.max_output_tokens  # type: ignore[attr-defined]
-                if len(limit) == 2:
-                    entry["limit"] = limit
+                # OpenCode's schema requires both keys when `limit` is
+                # present, so a partial limit is invalid — but silently
+                # emitting none because context_window was omitted leaves
+                # context accounting broken with no hint why. Fall back to the
+                # output cap for context so the pair is always complete.
+                context = provider.context_window or provider.max_output_tokens  # type: ignore[attr-defined]
+                output = provider.max_output_tokens  # type: ignore[attr-defined]
+                if context and output:
+                    entry["limit"] = {"context": context, "output": output}
                 models[upstream] = entry
             block[name] = {
                 "npm": npm_for[provider.kind],  # type: ignore[attr-defined]

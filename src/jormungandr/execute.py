@@ -18,7 +18,7 @@ import logging
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -37,6 +37,9 @@ __all__ = [
 ]
 
 log = logging.getLogger(__name__)
+
+RESERVED_NAMES = frozenset({"report.json"})
+"""Names the run writes into output.dir itself."""
 
 
 class ExecutionError(RuntimeError):
@@ -73,6 +76,15 @@ class ExecutionReport:
     @property
     def ok(self) -> bool:
         return not self.failed
+
+
+def _contained_in(path: Path, root: Path) -> bool:
+    """Whether ``path`` really resolves inside ``root``."""
+    try:
+        path.resolve(strict=True).relative_to(root.resolve(strict=True))
+    except (ValueError, OSError):
+        return False
+    return True
 
 
 def _write_agents_md(workspace: Path, system: str) -> None:
@@ -157,6 +169,20 @@ def _prepare_workspace(record: PromptRecord, directory: Path) -> Path | None:
     content = staging
     if source.subdirectory:
         content = staging / source.subdirectory
+        # A repository controls what it stores at that path, and git can store
+        # a symlink. `is_dir()` follows it, `shutil.move` relocates the link
+        # itself, and Docker resolves a bind-mount source on the HOST — so a
+        # repo shipping `pkg -> /etc` would hand the agent the host's /etc,
+        # writable, past every capability and network restriction. Validating
+        # the string in the prompt file does not help: the escape is in the
+        # repository, not the config.
+        if content.is_symlink() or not _contained_in(content, staging):
+            shutil.rmtree(staging, ignore_errors=True)
+            raise ExecutionError(
+                f"{record.id}: subdirectory {source.subdirectory!r} in "
+                f"{source.clone_url} is a symlink or escapes the repository; "
+                "refusing to mount it"
+            )
         if not content.is_dir():
             shutil.rmtree(staging, ignore_errors=True)
             raise ExecutionError(
@@ -174,14 +200,55 @@ def _prepare_workspace(record: PromptRecord, directory: Path) -> Path | None:
     return target
 
 
+DEFAULT_WORKDIR = "/workspace"
+
+
+def workdir_of(config: JormConfig) -> str:
+    """Where the agent actually works inside the container.
+
+    Read from the ``workdir`` module rather than assumed: the module's path is
+    configurable, and mounting the prepared workspace at a hardcoded
+    ``/workspace`` while the agent runs somewhere else would hand it an empty
+    directory and no error.
+    """
+    for declaration in config.image.modules:
+        if declaration.get("name") == "workdir":
+            return str(declaration.get("path") or DEFAULT_WORKDIR)
+    return DEFAULT_WORKDIR
+
+
+def _mount_target(mount: str) -> str:
+    """The container-side path of a ``host:container[:opts]`` mount string."""
+    parts = mount.split(":")
+    return parts[1] if len(parts) >= 2 else ""
+
+
 def _container_spec(
     config: JormConfig, image: str, workspace: Path | None
 ) -> ContainerSpec:
     mounts = list(config.run.mounts)
     if workspace is not None:
+        # Docker resolves a bind-mount source host-side, so a symlinked source
+        # would expose whatever it points at. Belt and braces: the extraction
+        # path already refuses symlinks, and this catches any other route.
+        if workspace.is_symlink() or not workspace.is_dir():
+            raise ExecutionError(
+                f"workspace {workspace} is not a real directory; refusing to mount it"
+            )
+        target = workdir_of(config)
+        clashing = [m for m in mounts if _mount_target(m) == target]
+        if clashing:
+            # Two mounts on one path: Docker takes the last and discards the
+            # other silently, so the agent would get one of them with no
+            # indication which.
+            raise ExecutionError(
+                f"run.mounts already mounts {target!r} ({clashing[0]}), which is "
+                "where the record's workspace goes. Remove that mount, or drop "
+                "the record's workspace/github_repo/git."
+            )
         # :Z is deliberately omitted — it is SELinux-specific and breaks on
         # Docker Desktop. The container user owns the copy via its uid.
-        mounts.append(f"{workspace}:/workspace")
+        mounts.append(f"{workspace}:{target}")
     return ContainerSpec(
         image=image,
         env=dict(config.run.env),
@@ -238,11 +305,19 @@ def _run_one(
     output_dir: Path,
 ) -> RecordResult:
     directory = output_dir / record.id
+    if directory.exists():
+        # Otherwise a re-run leaves last run's turn-*.txt and state/ beside the
+        # new ones, and the directory describes two runs at once.
+        shutil.rmtree(directory, ignore_errors=True)
     directory.mkdir(parents=True, exist_ok=True)
 
     try:
         workspace = _prepare_workspace(record, directory)
-    except ExecutionError as exc:
+    except Exception as exc:  # noqa: BLE001 - one record must not end the run
+        # Not just ExecutionError: a clone can raise OSError (disk full),
+        # PermissionError, or a subprocess timeout, and losing 199 completed
+        # records because record 200 hit a full disk is the wrong trade.
+        log.exception("record %s: workspace preparation failed", record.id)
         _write_result(directory, record, None, str(exc))
         return RecordResult(record.id, False, None, directory, str(exc))
 
@@ -304,7 +379,7 @@ def execute(
     # {env:VAR} with the empty string rather than failing, so a missing key
     # would otherwise surface as a 401 from the provider after a full image
     # build and N container starts.
-    environ = available_env if available_env is not None else set(os.environ)
+    environ = set(available_env) if available_env is not None else set(os.environ)
     for path in config.run.env_files:
         environ |= env_file_names(Path(path))
     missing = config.missing_env(environ)
@@ -318,6 +393,16 @@ def execute(
     prompts = tuple(records) if records is not None else resolve_prompts(config)
     if not prompts:
         raise ExecutionError("no prompt records to run")
+
+    # Checked before any container starts: a record named "report.json" would
+    # otherwise collide with the run report and fail after every record had
+    # already run, discarding the whole run's work.
+    clashing = sorted(r.id for r in prompts if r.id in RESERVED_NAMES)
+    if clashing:
+        raise ExecutionError(
+            f"record id(s) {', '.join(clashing)} are reserved names used by the "
+            "run's own output; rename them"
+        )
 
     image_builder = builder if builder is not None else ImageBuilder()
     build = image_builder.build(compile_image_spec(config))  # type: ignore[attr-defined]
@@ -336,7 +421,10 @@ def execute(
             ): record
             for record in prompts
         }
-        for future in futures:
+        # as_completed, not submission order: reporting in submission order
+        # means a slow first record withholds every later record's line, so the
+        # run looks stalled while it is in fact progressing.
+        for future in as_completed(futures):
             result = future.result()
             results.append(result)
             if on_progress is not None:

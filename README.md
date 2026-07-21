@@ -70,9 +70,8 @@ image     my-harness:runtime-cf174c9185 (cached)
 Each record gets a directory holding its workspace, raw per-turn output, a
 `result.json`, and the harness's own session record.
 
-Housekeeping: `jormungandr prune` removes images this tool built (by label,
-never by name prefix), and `jormungandr reap` removes containers left by
-crashed runs — by default only those whose owning process is gone, so a
+Housekeeping: `jormungandr prune` removes images this tool built, and
+`jormungandr reap` removes containers left by crashed runs — by default only those whose owning process is gone, so a
 concurrent run is left alone.
 
 Everything is also a library call: `load_config`, `compile_image_spec`,
@@ -221,8 +220,15 @@ changes and a rebuild happens. Change nothing and the build is skipped. There is
 no mtime check and no force-rebuild flag to remember.
 
 Every image is stamped with OCI labels (`dev.jormungandr.*`). Discovery and
-pruning filter on those labels, never on name prefixes, so `prune` can never
-touch an unrelated image of yours.
+pruning filter on those labels rather than on name prefixes.
+
+The label alone is not sufficient, though: Docker propagates a parent image's
+labels into any child, so an image you build `FROM` one of ours inherits
+`dev.jormungandr.managed=true`. `prune` therefore also requires the image's
+digest label to match the digest embedded in its own tag — which a derived
+image cannot satisfy, because it inherits its *parent's* digest. Containers get
+the same treatment through a session label written at creation time, which an
+image cannot supply.
 
 ### Containers
 

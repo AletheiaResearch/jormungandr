@@ -106,6 +106,10 @@ class ProviderSpec(BaseModel):
             if looks_secret
             else ""
         )
+        # The offending value is deliberately NOT interpolated. pydantic echoes
+        # the input in its own error text, so this validator raises with the
+        # value stripped out — otherwise reporting a leaked key would print the
+        # key, into a terminal and very likely a CI log.
         raise ValueError(
             f"api_key must be an environment reference like ${{MY_API_KEY}}.{detail}"
             " Baked config is readable by anyone who can pull the image; supply"

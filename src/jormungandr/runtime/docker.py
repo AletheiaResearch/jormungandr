@@ -249,6 +249,23 @@ class DockerCli:
         """
         return str(self.inspect(reference).get("Id", ""))
 
+    def image_label(self, reference: str, label: str) -> str:
+        """One label off an image, or "" if absent or the image is gone."""
+        # json.dumps, not repr: Go templates need double quotes, and %r
+        # produces single ones — which silently yields an empty result rather
+        # than an error.
+        quoted = json.dumps(label)
+        proc = self.run(
+            ["image", "inspect", "--format", f"{{{{index .Config.Labels {quoted}}}}}",
+             reference],
+            check=False,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            return ""
+        value = proc.stdout.strip()
+        return "" if value in {"", "<no value>"} else value
+
     def list_images(self, *, label: str | None = None) -> list[dict[str, str]]:
         args = ["image", "ls", "--format", "{{json .}}"]
         if label:

@@ -86,10 +86,12 @@ def prune(
         tuple[str, ...], Parameter(help="Image references to preserve.")
     ] = (),
 ) -> None:
-    """Remove images this tool created.
+    """Remove images this tool built.
 
-    Selected by label, never by name prefix, so an unrelated image of yours can
-    never be collected.
+    Identified by a label *and* a digest that matches the one embedded in the
+    tag. The label alone is not enough: Docker propagates a parent image's
+    labels into any child, so an image you built FROM one of ours carries it
+    too — and would otherwise be deleted.
     """
     from jormungandr.commands.jobs import prune as run_prune
 

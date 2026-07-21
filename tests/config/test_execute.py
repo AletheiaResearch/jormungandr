@@ -430,3 +430,211 @@ class TestGitWorkspaces:
             available_env=ENV,
         )
         assert any("/workspace" in m for m in runner.calls[0]["spec"].mounts)
+
+
+class TestMountCollisions:
+    """The workspace mount must go where the agent actually works."""
+
+    def test_workspace_mounts_at_the_configured_workdir(self, project: Path, tmp_path) -> None:
+        # Hardcoding /workspace while the workdir module says otherwise hands
+        # the agent an empty directory and no error.
+        import json as _json
+
+        config = _json.loads(_json.dumps(
+            {"version": 1,
+             "providers": {"p": {"base_url": "https://h/v1", "api_key": "${K}",
+                                 "models": {"m": "up"}}},
+             "harness": {"name": "droid", "model": "p/m"},
+             "prompts": {"file": "./prompts.jsonl"},
+             "image": {"modules": [{"name": "workdir", "path": "/srv/app"}]}}))
+        (project / "jorm.yaml").write_text(_json.dumps(config))
+        source = tmp_path / "src"
+        source.mkdir()
+        runner = FakeRunner()
+        execute(
+            load(project),
+            records=[PromptRecord(prompt="x", id="w",
+                                  workspace={"type": "local", "path": str(source)})],
+            builder=FakeBuilder(),
+            runner=runner,
+            available_env={"K"},
+        )
+        assert any(m.endswith(":/srv/app") for m in runner.calls[0]["spec"].mounts)
+
+    def test_a_colliding_run_mount_is_an_error(self, project: Path, tmp_path) -> None:
+        # Docker takes the last of two mounts on one path and discards the
+        # other silently, so the agent gets one with no indication which.
+        (project / "jorm.yaml").write_text(
+            CONFIG.replace("output:", "run:\n  mounts: ['/tmp/other:/workspace']\noutput:")
+        )
+        source = tmp_path / "src"
+        source.mkdir()
+        report = execute(
+            load(project),
+            records=[PromptRecord(prompt="x", id="w",
+                                  workspace={"type": "local", "path": str(source)})],
+            builder=FakeBuilder(),
+            runner=FakeRunner(),
+            available_env=ENV,
+        )
+        assert not report.ok
+        assert "already mounts" in (report.results[0].error or "")
+
+    def test_a_run_mount_elsewhere_is_fine(self, project: Path, tmp_path) -> None:
+        (project / "jorm.yaml").write_text(
+            CONFIG.replace("output:", "run:\n  mounts: ['/tmp/other:/data']\noutput:")
+        )
+        source = tmp_path / "src"
+        source.mkdir()
+        runner = FakeRunner()
+        report = execute(
+            load(project),
+            records=[PromptRecord(prompt="x", id="w",
+                                  workspace={"type": "local", "path": str(source)})],
+            builder=FakeBuilder(),
+            runner=runner,
+            available_env=ENV,
+        )
+        assert report.ok
+        assert len(runner.calls[0]["spec"].mounts) == 2
+
+    def test_run_mounts_alone_do_not_collide(self, project: Path) -> None:
+        (project / "jorm.yaml").write_text(
+            CONFIG.replace("output:", "run:\n  mounts: ['/tmp/other:/workspace']\noutput:")
+        )
+        runner = FakeRunner()
+        report = execute(
+            load(project),
+            records=[PromptRecord(prompt="x", id="w")],
+            builder=FakeBuilder(),
+            runner=runner,
+            available_env=ENV,
+        )
+        # No record workspace, so the user's mount is the workspace. Fine.
+        assert report.ok
+
+
+class TestReviewRegressions:
+    """Each of these reproduces a defect found by adversarial review."""
+
+    def test_a_symlinked_subdirectory_is_refused(self, project: Path, tmp_path) -> None:
+        # A repo can store `pkg` as a symlink to a host path. is_dir() follows
+        # it, shutil.move relocates the link, and Docker resolves a bind-mount
+        # source HOST-side — handing the agent that directory, writable, past
+        # every capability and network restriction.
+        import subprocess
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        (victim / "secret.txt").write_text("do not touch")
+        (repo / "pkg").symlink_to(victim)
+        (repo / "README.md").write_text("x")
+        run = lambda *a: subprocess.run(a, cwd=repo, check=True, capture_output=True)  # noqa: E731
+        run("git", "init", "--quiet", "-b", "main")
+        run("git", "config", "user.email", "t@e.com")
+        run("git", "config", "user.name", "T")
+        run("git", "add", "-A")
+        run("git", "commit", "--quiet", "-m", "x")
+
+        report = execute(
+            load(project),
+            records=[
+                PromptRecord(
+                    prompt="x",
+                    id="evil",
+                    git={"clone_url": str(repo), "subdirectory": "pkg"},
+                )
+            ],
+            builder=FakeBuilder(),
+            runner=FakeRunner(),
+            available_env=ENV,
+        )
+        assert not report.ok
+        assert "symlink" in (report.results[0].error or "")
+        assert (victim / "secret.txt").read_text() == "do not touch"
+
+    def test_a_non_execution_error_fails_only_that_record(self, project: Path) -> None:
+        # A clone can raise OSError (disk full) or PermissionError; losing 199
+        # completed records because record 200 hit a full disk is the wrong
+        # trade.
+        import jormungandr.execute as execute_module
+
+        original = execute_module._prepare_workspace
+
+        def explode(record, directory):
+            if record.id == "b":
+                raise OSError("no space left on device")
+            return original(record, directory)
+
+        execute_module._prepare_workspace = explode
+        try:
+            report = execute(
+                load(project), builder=FakeBuilder(), runner=FakeRunner(), available_env=ENV
+            )
+        finally:
+            execute_module._prepare_workspace = original
+
+        assert [r.id for r in report.failed] == ["b"]
+        assert [r.id for r in report.succeeded] == ["a"]
+        # the report survived
+        assert (report.output_dir / "report.json").exists()
+
+    def test_a_rerun_does_not_merge_old_artifacts(self, project: Path) -> None:
+        first = execute(
+            load(project), builder=FakeBuilder(), runner=FakeRunner(), available_env=ENV
+        )
+        stale = first.results[0].directory / "turn-9.stdout.txt"
+        stale.write_text("from a previous run")
+        second = execute(
+            load(project), builder=FakeBuilder(), runner=FakeRunner(), available_env=ENV
+        )
+        assert not (second.results[0].directory / "turn-9.stdout.txt").exists()
+
+    def test_a_reserved_record_id_is_refused_before_running(self, project: Path) -> None:
+        # Otherwise it collides with the run report and fails after every
+        # container has already run.
+        runner = FakeRunner()
+        with pytest.raises(ExecutionError, match="reserved"):
+            execute(
+                load(project),
+                records=[PromptRecord(prompt="x", id="report.json")],
+                builder=FakeBuilder(),
+                runner=runner,
+                available_env=ENV,
+            )
+        assert runner.calls == []
+
+    def test_available_env_is_not_mutated(self, project: Path) -> None:
+        caller_set = set(ENV)
+        execute(
+            load(project),
+            builder=FakeBuilder(),
+            runner=FakeRunner(),
+            available_env=caller_set,
+        )
+        assert caller_set == ENV
+
+    def test_run_settings_actually_reach_the_container(self, project: Path) -> None:
+        # Previously asserted nowhere: env, env_files and memory could have
+        # been dropped silently.
+        (project / "secrets.env").write_text("OPENROUTER_API_KEY=x\n")
+        (project / "jorm.yaml").write_text(
+            CONFIG.replace(
+                "output:",
+                "run:\n"
+                "  env: {LANGFUSE_HOST: 'https://h'}\n"
+                f"  env_files: ['{project / 'secrets.env'}']\n"
+                "  memory: 2g\n"
+                "  network: none\n"
+                "output:",
+            )
+        )
+        runner = FakeRunner()
+        execute(load(project), builder=FakeBuilder(), runner=runner, available_env=set())
+        spec = runner.calls[0]["spec"]
+        assert spec.env["LANGFUSE_HOST"] == "https://h"
+        assert spec.env_files and spec.env_files[0].endswith("secrets.env")
+        assert spec.limits.memory == "2g"
+        assert spec.network == "none"

@@ -41,6 +41,12 @@ __all__ = [
 
 GITHUB_REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
+RECORD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+"""Ids become a directory name under the output directory, so they must be a
+single safe path component. Without this an id of ``../../x`` escapes that
+directory — and since the workspace is cleared with ``rmtree`` before each run,
+that is arbitrary deletion driven by a data file."""
+
 
 def _safe_relative(value: str | None, *, field: str) -> str | None:
     """Normalize a path that will be joined below the workspace directory.
@@ -199,6 +205,24 @@ class PromptRecord(BaseModel):
                 raise ValueError(f"follow_up_prompts entry {index} cannot be empty")
             cleaned.append(text)
         return tuple(cleaned)
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str | None) -> str | None:
+        """Ids name a directory, so they must be one safe path component.
+
+        `output_dir / record.id` with an absolute id discards output_dir
+        entirely, and with `..` it escapes upward — into an rmtree.
+        """
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not RECORD_ID.fullmatch(cleaned) or cleaned in {".", ".."}:
+            raise ValueError(
+                f"id must be a single path component of letters, digits, dot, "
+                f"dash or underscore, starting alphanumeric; got {value!r}"
+            )
+        return cleaned
 
     @field_validator("github_repo")
     @classmethod
