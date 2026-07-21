@@ -383,8 +383,27 @@ class TestCompileToImageSpec:
         )
         assert self.compiled(project).runtime.digest != before
 
-    def test_airgap_setting_reaches_the_image(self, project: Path) -> None:
-        assert "FACTORY_AIRGAP_ENABLED=true" in self.compiled(project).runtime.dockerfile
+    def test_harness_settings_reach_the_image(self, project: Path) -> None:
+        # Asserting the default proves nothing about whether harness.<name>
+        # settings are wired through at all — airgap defaults to true, so the
+        # image would look identical with the block ignored. Set a
+        # non-default and check the image changes.
+        default = self.compiled(project).runtime.dockerfile
+        assert "FACTORY_AIRGAP_ENABLED=true" in default
+
+        (project / "jorm.yaml").write_text(
+            BASE_CONFIG.replace("    airgap: true", "    airgap: false")
+        )
+        overridden = self.compiled(project).runtime.dockerfile
+        assert "FACTORY_AIRGAP_ENABLED" not in overridden
+
+    def test_an_unknown_harness_setting_is_rejected(self, project: Path) -> None:
+        # Otherwise a typo in the harness block is silently ignored.
+        (project / "jorm.yaml").write_text(
+            BASE_CONFIG.replace("    airgap: true", "    airgapp: true")
+        )
+        with pytest.raises(Exception):
+            self.compiled(project)
 
 
 class TestTeichFormatCompatibility:

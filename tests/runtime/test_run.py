@@ -233,3 +233,70 @@ class TestTurnResult:
         turn = TurnResult.from_command(0, "p", CommandResult(0, '{"a":1}', "warn", 1.0))
         assert turn.stdout == '{"a":1}'
         assert turn.stderr == "warn"
+
+
+class TestRunnerForwarding:
+    """What PromptRunner passes to the invocation was never asserted.
+
+    model, system and timeout could each have been silently dropped, and every
+    existing test would still have passed.
+    """
+
+    class Recording:
+        harness = "droid"
+        state_paths = ()
+        system_via = "argv"
+
+        def __init__(self) -> None:
+            self.built: list[dict] = []
+
+        def build(self, prompt, *, model=None, system=None):
+            from jormungandr.runtime.invocation import Invocation
+
+            self.built.append({"prompt": prompt, "model": model, "system": system})
+            return Invocation(argv=("true",), stdin=prompt)
+
+    def run_with(self, session: FakeSession, **kwargs):
+        invocation = self.Recording()
+        PromptRunner(runtime=FakeRuntime(session)).run(
+            harness="droid",
+            image="img",
+            prompts=kwargs.pop("prompts", ["one"]),
+            invocation=invocation,
+            **kwargs,
+        )
+        return invocation
+
+    def test_model_is_forwarded(self) -> None:
+        built = self.run_with(FakeSession(), model="p/m").built
+        assert built[0]["model"] == "p/m"
+
+    def test_system_is_forwarded_to_every_turn(self) -> None:
+        built = self.run_with(
+            FakeSession(), prompts=["a", "b"], system="be terse"
+        ).built
+        assert [b["system"] for b in built] == ["be terse", "be terse"]
+
+    def test_no_system_means_none(self) -> None:
+        assert self.run_with(FakeSession()).built[0]["system"] is None
+
+    def test_timeout_reaches_the_exec(self) -> None:
+        session = FakeSession()
+        self.run_with(session, timeout=42)
+        harness_calls = [c for c in session.calls if c["argv"] == ["true"]]
+        assert harness_calls[0]["timeout"] == 42
+
+    def test_default_timeout_is_used_when_unset(self) -> None:
+        session = FakeSession()
+        invocation = self.Recording()
+        PromptRunner(runtime=FakeRuntime(session), default_timeout=77).run(
+            harness="droid", image="img", prompts=["a"], invocation=invocation
+        )
+        harness_calls = [c for c in session.calls if c["argv"] == ["true"]]
+        assert harness_calls[0]["timeout"] == 77
+
+    def test_the_prompt_goes_on_stdin_for_every_turn(self) -> None:
+        session = FakeSession()
+        self.run_with(session, prompts=["one", "two"])
+        stdins = [c["stdin"] for c in session.calls if c["argv"] == ["true"]]
+        assert stdins == ["one", "two"]

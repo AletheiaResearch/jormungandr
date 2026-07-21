@@ -79,6 +79,34 @@ def _resolve_paths(data: dict[str, Any], base: Path) -> None:
         run["env_files"] = [str((base / str(p)).resolve()) for p in run["env_files"]]
 
 
+def _reject_literal_credentials(data: dict[str, Any], path: Path) -> None:
+    """Refuse a literal api_key before pydantic ever sees it.
+
+    ProviderSpec already rejects one, but pydantic includes the offending
+    ``input_value`` in its error text — so reporting a leaked key would print
+    the key, to a terminal and very likely into a CI log where it outlives the
+    run. Checking the raw mapping first means the value never reaches a
+    formatter.
+    """
+    from jormungandr.config.providers import ENV_REFERENCE
+
+    providers = data.get("providers")
+    if not isinstance(providers, dict):
+        return
+    for name, provider in providers.items():
+        if not isinstance(provider, dict):
+            continue
+        key = provider.get("api_key")
+        if isinstance(key, str) and key and not ENV_REFERENCE.match(key):
+            raise ConfigError(
+                f"{path}: providers.{name}.api_key must be an environment "
+                "reference like ${MY_API_KEY}, not a literal value. Baked config "
+                "is readable by anyone who can pull the image; supply the value "
+                "at run time via run.env_files. "
+                "(The offending value is not shown here on purpose.)"
+            )
+
+
 def load_config(
     path: Path,
     *,
@@ -102,6 +130,8 @@ def load_config(
     _resolve_paths(raw, path.parent)
     if apply_env:
         _apply_env_overrides(raw, dict(environ if environ is not None else os.environ))
+
+    _reject_literal_credentials(raw, path)
 
     try:
         return JormConfig.model_validate(raw)
