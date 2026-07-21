@@ -22,6 +22,7 @@ import subprocess
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from jormungandr.config.models import JormConfig
@@ -88,14 +89,20 @@ def user_of(config: JormConfig) -> str:
     return DEFAULT_USER
 
 
+@lru_cache(maxsize=512)
 def resolve_commit(clone_url: str, ref: str | None) -> str:
     """Turn a ref into a concrete revision.
 
     The workspace image is content-addressed, so it can only be honest about a
     fixed revision: caching a branch name would serve yesterday's code from
-    today's tag. A already-resolved 40-character sha is taken as-is; anything
+    today's tag. An already-resolved 40-character sha is taken as-is; anything
     else — including an omitted ref, which means the default branch — is
     resolved with ``git ls-remote`` so the digest names real content.
+
+    Memoized per ``(url, ref)``: a run of two hundred records against one
+    repository otherwise makes two hundred identical network calls, and worse,
+    could resolve to different commits mid-run if the branch moved — records in
+    the same run would then be testing different code.
 
     Public repositories only. No credentials are read or forwarded.
     """

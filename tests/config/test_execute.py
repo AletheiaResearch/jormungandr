@@ -541,3 +541,65 @@ class TestReviewRegressions:
         assert spec.env_files and spec.env_files[0].endswith("secrets.env")
         assert spec.limits.memory == "2g"
         assert spec.network == "none"
+
+
+class TestFinalPatches:
+    def test_a_ref_is_resolved_once_per_repo(self) -> None:
+        # 200 records on one repo made 200 identical network calls — and could
+        # resolve to different commits mid-run if the branch moved, so records
+        # in the same run would be testing different code.
+        import subprocess as sp
+
+        from jormungandr.execute import resolve_commit
+
+        resolve_commit.cache_clear()
+        calls = {"n": 0}
+        real = sp.run
+
+        def counting(args, *a, **kw):
+            if isinstance(args, (list, tuple)) and args[:2] == ["git", "ls-remote"]:
+                calls["n"] += 1
+            return real(args, *a, **kw)
+
+        sp.run = counting
+        try:
+            first = resolve_commit("https://github.com/octocat/Hello-World", "master")
+            second = resolve_commit("https://github.com/octocat/Hello-World", "master")
+        finally:
+            sp.run = real
+            resolve_commit.cache_clear()
+
+        assert first == second
+        assert calls["n"] == 1
+
+    def test_prune_removes_deepest_tier_first(self) -> None:
+        # A tier cannot be deleted while another is built on it, and there are
+        # three — distinguishing only "base or not" left runtime and workspace
+        # in arbitrary order.
+        from jormungandr.runtime.build import ImageBuilder
+
+        class Docker:
+            def __init__(self):
+                self.order: list[str] = []
+
+            def list_images(self, *, label=None):
+                return [
+                    {"Repository": "r", "Tag": "base-aaa"},
+                    {"Repository": "r", "Tag": "workspace-ccc"},
+                    {"Repository": "r", "Tag": "runtime-bbb"},
+                ]
+
+            def image_label(self, reference, label):
+                return reference.split("-")[-1]
+
+            def remove_image(self, reference, *, force=False):
+                self.order.append(reference)
+                return True
+
+        docker = Docker()
+        ImageBuilder(state_dir=Path("/tmp/unused"), docker=docker).prune()
+        assert docker.order == [
+            "r:workspace-ccc",
+            "r:runtime-bbb",
+            "r:base-aaa",
+        ]
