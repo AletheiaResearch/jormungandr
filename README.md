@@ -84,7 +84,7 @@ An image is a base plus an ordered list of modules. A module contributes
 Dockerfile instructions and, optionally, files baked into the build context.
 
 Built-ins: `apt`, `node`, `python`, `opencode`, `langfuse`, `script`,
-`workspace`.
+`workspace`. Only `opencode` is a harness; see below.
 
 Modules are ordered by a topological sort over their `requires`, with ties
 broken by `(stage, name)` — never by the order you happened to list them in,
@@ -127,20 +127,51 @@ Third parties can ship modules without forking, via entry points:
 ripgrep = "my_package.modules:Ripgrep"
 ```
 
-### OpenCode
+### Harnesses and installers
 
-The first supported harness. OpenCode ships as an npm package whose real
-payload is a set of platform-specific prebuilt binaries published as optional
-dependencies (`opencode-linux-arm64`, `opencode-linux-x64`, plus musl and
-baseline variants). npm resolves the right one for the platform it installs on,
-so the ordinary global install works on both glibc and musl bases — verified
-against `node:22-bookworm-slim` and `node:22-alpine`.
+Harnesses have no common install mechanism, so the install method is a
+*strategy* a harness composes rather than a fixed part of what a harness is:
 
-The version is pinned by default. An unpinned `@latest` would make the digest
-lie: the same tag would refer to different software depending on when it was
-built. The build also runs `opencode --version` as its last step, because npm
-exits 0 even when no optional binary matched the platform — actually running it
-is the only proof the install is usable.
+| Installer | Shape | Used by |
+|---|---|---|
+| `NpmGlobal` | `npm install -g pkg@version` | opencode, pi |
+| `ShellInstall` | download, checksum, run | droid |
+| `GitPythonApp` | clone → `uv venv` → editable install → PATH shim | hermes |
+
+`GitPythonApp` is the one that rules out a package-manager-shaped base class:
+it needs git and Python as prerequisites, installs into a library directory,
+and has to emit a shell shim. Adding a fourth shape (release tarball, distro
+package, prebuilt binary) is one class in `installers.py` — no harness module
+changes.
+
+What harnesses *do* share lives in `Harness`: the `HARNESS` stage, version
+identity, and a post-install verification step. That step matters because
+installers lie — npm exits 0 even when no platform-specific optional binary
+matched, so running the program is the only proof the install is usable.
+
+```python
+Harness(
+    name="hermes",
+    installer=GitPythonApp(repo, ref="v1.0.0", binary="hermes"),
+    binary="hermes",
+)
+```
+
+`ShellInstall` warns in the generated Dockerfile when given no `sha256`, since
+an unpinned remote installer makes the image contents depend on whatever the
+URL served at build time.
+
+**Only OpenCode is registered as a built-in.** The other shapes are exercised
+in tests but not shipped as modules, because their package names and versions
+have not been verified by an actual build.
+
+OpenCode ships as an npm package whose real payload is a set of
+platform-specific prebuilt binaries published as optional dependencies
+(`opencode-linux-arm64`, `opencode-linux-x64`, plus musl and baseline
+variants). npm resolves the right one for the platform it installs on, so the
+ordinary global install works on both glibc and musl bases — verified against
+`node:22-bookworm-slim` and `node:22-alpine`. The version is pinned by default;
+an unpinned `@latest` would make the digest lie.
 
 ### Image identity
 
@@ -210,7 +241,7 @@ src/jormungandr/
   cli.py                 launcher only; no commands wired up yet
   runtime/
     layers.py            typed Dockerfile instructions + renderer
-    modules/             the composable module contract, registry, built-ins
+    modules/             module contract, registry, installers, built-ins
     spec.py              ImageSpec / ContainerSpec / ResourceLimits
     compose.py           spec -> tiered Dockerfiles + contexts + digests (pure)
     identity.py          content hashing, tags, labels

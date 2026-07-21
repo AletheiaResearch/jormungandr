@@ -26,9 +26,11 @@ from jormungandr.runtime.layers import (
     Workdir,
 )
 from jormungandr.runtime.modules.base import BuildContext, ModuleError, Stage
+from jormungandr.runtime.modules.installers import Installer, NpmGlobal
 from jormungandr.runtime.modules.registry import REGISTRY
 
 __all__ = [
+    "Harness",
     "OpenCode",
     "AptPackages",
     "Langfuse",
@@ -223,12 +225,66 @@ class PythonToolchain:
         return {"venv": self.venv}
 
 
-class OpenCode:
-    """Install the OpenCode agent harness.
+class Harness:
+    """An agent harness: an installer, a binary, and proof it works.
+
+    Deliberately does not know *how* its program is installed — that is an
+    :class:`~jormungandr.runtime.modules.installers.Installer` strategy.
+    Harnesses have no common install mechanism (npm for opencode and pi, a
+    piped shell script for droid, a git clone plus a Python venv for hermes),
+    so a base class that assumed one would be wrong for the second harness
+    added.
+
+    What harnesses *do* share, and what lives here: the HARNESS stage, version
+    identity, and a post-install verification step.
+    """
+
+    stage = Stage.HARNESS
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        installer: Installer,
+        binary: str,
+        verify: Sequence[str] = ("--version",),
+        requires: Sequence[str] | None = None,
+    ) -> None:
+        self.name = name
+        self.installer = installer
+        self.binary = _safe_token(binary, what="harness binary")
+        self.verify = tuple(str(a) for a in verify)
+        self.requires = tuple(
+            requires if requires is not None else installer.default_requires
+        )
+
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+        body: list[Instruction] = [
+            Comment(f"harness: {self.name} ({self.installer.identity().get('kind')})"),
+            *self.installer.instructions(context),
+        ]
+        if self.verify:
+            # Fail the build here rather than at run time. Installers lie: npm
+            # exits 0 even when no platform-specific optional binary matched,
+            # so actually running the program is the only proof it is usable.
+            args = " ".join(_quoted_arg(a, what="verify arg") for a in self.verify)
+            body.append(Run(f"{self.binary} {args}"))
+        return body
+
+    def identity(self) -> Mapping[str, object]:
+        return {
+            "binary": self.binary,
+            "verify": list(self.verify),
+            "installer": dict(self.installer.identity()),
+        }
+
+
+class OpenCode(Harness):
+    """The OpenCode harness.
 
     OpenCode ships as an npm package whose real payload is a set of
     platform-specific prebuilt binaries published as optional dependencies
-    (``opencode-linux-arm64``, ``opencode-linux-x64``, and musl/baseline
+    (``opencode-linux-arm64``, ``opencode-linux-x64``, plus musl and baseline
     variants). npm resolves the right one for the platform it installs on, so
     the ordinary global install works on both glibc and musl bases — verified
     against node:22-bookworm-slim and node:22-alpine.
@@ -238,46 +294,24 @@ class OpenCode:
     depending on when it happened to be built.
     """
 
-    stage = Stage.HARNESS
-
     PACKAGE = "opencode-ai"
     BINARY = "opencode"
+    DEFAULT_VERSION = "1.18.4"
 
     def __init__(
         self,
         *,
-        version: str = "1.18.4",
+        version: str = DEFAULT_VERSION,
         package: str | None = None,
         name: str = "opencode",
         requires: Sequence[str] = ("node",),
     ) -> None:
-        self.name = name
-        self.package = _safe_token(package or self.PACKAGE, what="npm package")
-        self.version = str(version)
-        _quoted_arg(self.version, what="opencode version")
-        self.requires = tuple(requires)
-
-    @property
-    def spec(self) -> str:
-        return f"{self.package}@{self.version}"
-
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
-        return [
-            Comment(f"opencode harness ({self.spec})"),
-            Run(
-                [
-                    f"npm install -g {_quoted_arg(self.spec, what='npm install spec')}",
-                    # Fail the build here rather than at run time: npm exits 0
-                    # even when no optional binary matched the platform, so the
-                    # only proof the install is usable is running it.
-                    f"{self.BINARY} --version",
-                ],
-                mounts=_NPM_CACHE,
-            ),
-        ]
-
-    def identity(self) -> Mapping[str, object]:
-        return {"package": self.package, "version": self.version}
+        super().__init__(
+            name=name,
+            installer=NpmGlobal(package or self.PACKAGE, version),
+            binary=self.BINARY,
+            requires=requires,
+        )
 
 
 class Langfuse:

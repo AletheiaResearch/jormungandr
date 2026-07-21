@@ -128,7 +128,7 @@ class TestCompose:
         base = result.base.dockerfile
         assert base.index("apt packages") < base.index("python venv")
         runtime = result.runtime.dockerfile
-        assert runtime.index("opencode harness") < runtime.index("langfuse tracing")
+        assert runtime.index("harness: opencode") < runtime.index("langfuse tracing")
         assert runtime.index("langfuse tracing") < runtime.index("workspace /workspace")
 
     def test_labels_are_stamped_per_tier(self) -> None:
