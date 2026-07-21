@@ -127,20 +127,17 @@ class GitSource(BaseModel):
 class Workspace(BaseModel):
     """What the agent finds in its working directory — the resolved form.
 
-    Produced from ``github_repo`` or ``git``; also constructible directly for a
-    local directory, which Teich's format has no way to express.
+    Produced from ``github_repo`` or ``git``. A repository is materialized as
+    an image tier built by the daemon, so nothing here refers to the host.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    type: Literal["none", "local", "git"] = "none"
-    path: str | None = None
+    type: Literal["none", "git"] = "none"
     git: GitSource | None = None
 
     @model_validator(mode="after")
     def _check_fields_match_type(self) -> Workspace:
-        if self.type == "local" and not self.path:
-            raise ValueError("workspace type 'local' requires 'path'")
         if self.type == "git" and self.git is None:
             raise ValueError("workspace type 'git' requires 'git'")
         return self

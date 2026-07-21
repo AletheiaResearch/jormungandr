@@ -223,10 +223,11 @@ class TestPromptRecords:
         with pytest.raises(ValidationError):
             PromptRecord(prompt="x", promt="typo")
 
-    def test_local_workspace_is_expressible(self) -> None:
-        # Not in Teich's format, but a useful superset.
-        record = PromptRecord(prompt="x", workspace={"type": "local", "path": "/src"})
-        assert record.workspace.type == "local"
+    def test_a_local_directory_is_not_a_workspace_source(self) -> None:
+        # There is no host-side workspace: a repository is materialized as an
+        # image tier, so a path on the host has nowhere to go.
+        with pytest.raises(ValidationError):
+            PromptRecord(prompt="x", workspace={"type": "local", "path": "/src"})
 
     def test_overrides_are_namespaced(self) -> None:
         assert PromptRecord(prompt="x", overrides={"timeout": 60}).overrides.timeout == 60
@@ -506,18 +507,20 @@ class TestGitSource:
         with pytest.raises(ValidationError, match="only one workspace source"):
             PromptRecord(prompt="x", github_repo="a/b", git={"clone_url": "u"})
 
-    def test_git_and_local_workspace_are_exclusive(self) -> None:
+    def test_git_and_an_explicit_workspace_are_exclusive(self) -> None:
         with pytest.raises(ValidationError, match="only one workspace source"):
             PromptRecord(
                 prompt="x",
                 git={"clone_url": "u"},
-                workspace={"type": "local", "path": "/src"},
+                workspace={"type": "git", "git": {"clone_url": "other"}},
             )
 
-    def test_github_repo_and_local_workspace_are_exclusive(self) -> None:
+    def test_github_repo_and_an_explicit_workspace_are_exclusive(self) -> None:
         with pytest.raises(ValidationError, match="only one workspace source"):
             PromptRecord(
-                prompt="x", github_repo="a/b", workspace={"type": "local", "path": "/s"}
+                prompt="x",
+                github_repo="a/b",
+                workspace={"type": "git", "git": {"clone_url": "other"}},
             )
 
     def test_an_explicit_none_workspace_is_not_a_conflict(self) -> None:

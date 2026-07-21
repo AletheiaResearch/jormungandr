@@ -52,7 +52,7 @@ class FakeRunner:
         self.fail_ids = fail_ids or set()
 
     def run(self, *, harness, image, prompts, timeout=None, container_spec=None,
-            collect_state_to=None, workspace=None, workdir=None, **kwargs):
+            collect_state_to=None, workdir=None, **kwargs):
         self.calls.append(
             {
                 "harness": harness,
@@ -61,7 +61,6 @@ class FakeRunner:
                 "timeout": timeout,
                 "spec": container_spec,
                 "collect": collect_state_to,
-                "workspace": workspace,
                 "workdir": workdir,
             }
         )
@@ -219,62 +218,6 @@ class TestExecute:
         spec = runner.calls[0]["spec"]
         assert spec.network == "none"
         assert spec.limits.cpus == 8
-
-
-class TestWorkspaces:
-    def test_local_workspace_is_copied_not_mounted_in_place(
-        self, project: Path, tmp_path: Path
-    ) -> None:
-        # An agent handed a bind mount edits the caller's source tree, and a run
-        # that mutates its own inputs cannot be repeated.
-        source = tmp_path / "src"
-        source.mkdir()
-        (source / "file.txt").write_text("original")
-        record = PromptRecord(
-            id="w", prompt="x", workspace={"type": "local", "path": str(source)}
-        )
-        runner = FakeRunner()
-        report = execute(
-            load(project),
-            records=[record],
-            builder=FakeBuilder(),
-            runner=runner,
-            available_env=ENV,
-        )
-        copied = report.results[0].directory / "workspace" / "file.txt"
-        assert copied.read_text() == "original"
-        assert copied.resolve() != (source / "file.txt").resolve()
-        # Handed to the runner to copy in — not mounted. A bind mount's source
-        # is resolved host-side, so mounting is what made a symlinked source
-        # able to expose the host at all.
-        assert runner.calls[0]["workspace"] is not None
-        assert runner.calls[0]["spec"].mounts == ()
-
-    def test_missing_local_workspace_fails_that_record_only(self, project: Path) -> None:
-        record = PromptRecord(
-            id="w", prompt="x", workspace={"type": "local", "path": "/nope/missing"}
-        )
-        report = execute(
-            load(project),
-            records=[record],
-            builder=FakeBuilder(),
-            runner=FakeRunner(),
-            available_env=ENV,
-        )
-        assert not report.ok
-        assert "not a directory" in (report.results[0].error or "")
-
-    def test_no_workspace_means_no_mount(self, project: Path) -> None:
-        runner = FakeRunner()
-        self.__class__  # noqa: B018
-        execute(
-            load(project),
-            records=[PromptRecord(id="w", prompt="x")],
-            builder=FakeBuilder(),
-            runner=runner,
-            available_env=ENV,
-        )
-        assert runner.calls[0]["spec"].mounts == ()
 
 
 class TestOverrides:
@@ -440,11 +383,9 @@ class TestGitWorkspacesBecomeAnImage:
             ex.resolve_commit = original
 
         assert report.ok
-        assert not (report.results[0].directory / "workspace").exists()
         assert builder.layers and builder.layers[0].tier == "workspace"
         # the container runs from the workspace image, not the runtime one
         assert runner.calls[0]["image"].startswith("demo:workspace-")
-        assert runner.calls[0]["workspace"] is None
 
     def test_a_record_without_a_repo_uses_the_runtime_image(self, project: Path) -> None:
         runner = FakeRunner()
@@ -470,91 +411,6 @@ class TestRefResolution:
 
         with pytest.raises(ExecutionError, match="could not resolve|timed out"):
             resolve_commit("https://github.invalid/nope/nope", "main")
-
-
-class TestMountCollisions:
-    """The workspace mount must go where the agent actually works."""
-
-    def test_workspace_targets_the_configured_workdir(self, project: Path, tmp_path) -> None:
-        # Hardcoding /workspace while the workdir module says otherwise puts
-        # the workspace where the agent is not looking, with no error.
-        import json as _json
-
-        config = _json.loads(_json.dumps(
-            {"version": 1,
-             "providers": {"p": {"base_url": "https://h/v1", "api_key": "${K}",
-                                 "models": {"m": "up"}}},
-             "harness": {"name": "droid", "model": "p/m"},
-             "prompts": {"file": "./prompts.jsonl"},
-             "image": {"modules": [{"name": "workdir", "path": "/srv/app"}]}}))
-        (project / "jorm.yaml").write_text(_json.dumps(config))
-        source = tmp_path / "src"
-        source.mkdir()
-        runner = FakeRunner()
-        execute(
-            load(project),
-            records=[PromptRecord(prompt="x", id="w",
-                                  workspace={"type": "local", "path": str(source)})],
-            builder=FakeBuilder(),
-            runner=runner,
-            available_env={"K"},
-        )
-        assert runner.calls[0]["workdir"] == "/srv/app"
-
-    def test_a_colliding_run_mount_is_an_error(self, project: Path, tmp_path) -> None:
-        # An explicit mount on the workdir would be shadowed by the copied-in
-        # workspace with no sign of it.
-        (project / "jorm.yaml").write_text(
-            CONFIG.replace("output:", "run:\n  mounts: ['/tmp/other:/workspace']\noutput:")
-        )
-        source = tmp_path / "src"
-        source.mkdir()
-        report = execute(
-            load(project),
-            records=[PromptRecord(prompt="x", id="w",
-                                  workspace={"type": "local", "path": str(source)})],
-            builder=FakeBuilder(),
-            runner=FakeRunner(),
-            available_env=ENV,
-        )
-        assert not report.ok
-        assert "which is where the record's workspace is copied" in (
-            report.results[0].error or ""
-        )
-
-    def test_a_run_mount_elsewhere_is_fine(self, project: Path, tmp_path) -> None:
-        (project / "jorm.yaml").write_text(
-            CONFIG.replace("output:", "run:\n  mounts: ['/tmp/other:/data']\noutput:")
-        )
-        source = tmp_path / "src"
-        source.mkdir()
-        runner = FakeRunner()
-        report = execute(
-            load(project),
-            records=[PromptRecord(prompt="x", id="w",
-                                  workspace={"type": "local", "path": str(source)})],
-            builder=FakeBuilder(),
-            runner=runner,
-            available_env=ENV,
-        )
-        assert report.ok
-        # only the user's explicit mount; the workspace is copied, not mounted
-        assert runner.calls[0]["spec"].mounts == ("/tmp/other:/data",)
-
-    def test_run_mounts_alone_do_not_collide(self, project: Path) -> None:
-        (project / "jorm.yaml").write_text(
-            CONFIG.replace("output:", "run:\n  mounts: ['/tmp/other:/workspace']\noutput:")
-        )
-        runner = FakeRunner()
-        report = execute(
-            load(project),
-            records=[PromptRecord(prompt="x", id="w")],
-            builder=FakeBuilder(),
-            runner=runner,
-            available_env=ENV,
-        )
-        # No record workspace, so the user's mount is the workspace. Fine.
-        assert report.ok
 
 
 class TestReviewRegressions:
@@ -608,20 +464,20 @@ class TestReviewRegressions:
         # trade.
         import jormungandr.execute as execute_module
 
-        original = execute_module._prepare_local_workspace
+        original = execute_module._image_for
 
-        def explode(record, directory):
+        def explode(config, image, record, builder, directory, platform):
             if record.id == "b":
                 raise OSError("no space left on device")
-            return original(record, directory)
+            return original(config, image, record, builder, directory, platform)
 
-        execute_module._prepare_local_workspace = explode
+        execute_module._image_for = explode
         try:
             report = execute(
                 load(project), builder=FakeBuilder(), runner=FakeRunner(), available_env=ENV
             )
         finally:
-            execute_module._prepare_local_workspace = original
+            execute_module._image_for = original
 
         assert [r.id for r in report.failed] == ["b"]
         assert [r.id for r in report.succeeded] == ["a"]

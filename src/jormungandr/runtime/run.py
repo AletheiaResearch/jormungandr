@@ -107,7 +107,6 @@ class PromptRunner:
         network: str = "bridge",
         timeout: float | None = None,
         collect_state_to: Path | None = None,
-        workspace: Path | None = None,
         workdir: str = "/workspace",
         invocation: HarnessInvocation | None = None,
         container_spec: ContainerSpec | None = None,
@@ -132,21 +131,21 @@ class PromptRunner:
             network=network,  # type: ignore[arg-type]
         )
 
+        # Harnesses take a system prompt differently: droid has a flag, opencode
+        # has none and reads AGENTS.md from the working directory. Only the
+        # flag form can go through build(); the file form has to be written
+        # inside the container, since the working directory now comes from an
+        # image rather than the host.
+        via = getattr(how, "system_via", "argv")
+        system_argv = system if via == "argv" else None
+
         turns: list[TurnResult] = []
         with self.runtime.session(spec) as session:
-            if workspace is not None:
-                # Copied in, not bind-mounted. A bind mount's *source* is
-                # resolved on the host, so a symlinked source exposes whatever
-                # it points at — and a repository decides what it stores at a
-                # path, so no amount of validating the config prevents that.
-                # A copied symlink resolves inside the container instead, which
-                # makes the whole class of escape impossible rather than
-                # checked for. It also matches what a per-run container is for:
-                # nothing of the host is reachable from inside it.
-                self._copy_workspace_in(session, workspace, workdir)
+            if system and via == "agents_md":
+                self._write_agents_md(session, workdir, system)
 
             for index, prompt in enumerate(prompts):
-                call = how.build(prompt, model=model, system=system)
+                call = how.build(prompt, model=model, system=system_argv)
                 result = self._exec(session, call, timeout=timeout)
                 turns.append(TurnResult.from_command(index, prompt, result))
                 # A failed turn poisons the ones after it — the session state
@@ -158,11 +157,14 @@ class PromptRunner:
             artifacts = None
             if collect_state_to is not None:
                 artifacts = self._collect(session, how.state_paths, collect_state_to)
-            if workspace is not None:
-                # Bring back what the agent did. With a mount this was implicit;
-                # without one it has to be explicit, which is also the point at
-                # which "what changed?" becomes answerable.
-                self._copy_workspace_out(session, workdir, workspace)
+                # The working directory is part of what a run produced — for a
+                # coding agent it is most of it — so it comes back alongside the
+                # harness's own session record. Into a *sibling* directory: the
+                # copy clears its destination first, and pointing that at the
+                # parent would delete the state collected a line earlier.
+                self._copy_workspace_out(
+                    session, workdir, collect_state_to.parent / "workspace"
+                )
 
         return HarnessRun(
             harness=harness,
@@ -189,26 +191,22 @@ class PromptRunner:
         )
 
     @staticmethod
-    def _copy_workspace_in(
-        session: ContainerSession, workspace: Path, workdir: str
+    def _write_agents_md(
+        session: ContainerSession, workdir: str, system: str
     ) -> None:
-        """Place the prepared workspace inside the container."""
-        # `docker cp src/. dest` copies the *contents*, so the workdir keeps
-        # the ownership and mode the image gave it.
-        session.copy_in(f"{workspace}/.", workdir)
+        """Deliver a system prompt as AGENTS.md, for harnesses with no flag.
 
-        # The copied files carry the *host* uid from the archive, so the
-        # container user usually cannot write to its own working directory.
-        # The owner has to be resolved in a normal exec: inside a `user=root`
-        # exec, `id -u` is 0, so chowning to `$(id -u)` there hands everything
-        # back to root and the agent still cannot write.
-        owner = session.exec(["sh", "-c", "id -u"]).stdout.strip()
-        group = session.exec(["sh", "-c", "id -g"]).stdout.strip()
-        if owner:
-            session.exec(
-                ["sh", "-c", f"chown -R {owner}:{group or owner} {workdir} || true"],
-                user="root",
-            )
+        Written inside the container, because the working directory comes from
+        an image. Appended rather than overwritten: a cloned repository may
+        ship its own AGENTS.md, and discarding the project's instructions to
+        inject ours would change behaviour nobody asked to change.
+        """
+        # Delivered on stdin rather than argv so the text needs no quoting and
+        # never appears in the process table.
+        session.exec_with_stdin(
+            ["sh", "-c", f'cat >> "{workdir}/AGENTS.md"'],
+            stdin="\n\n" + system.rstrip() + "\n",
+        )
 
     @staticmethod
     def _copy_workspace_out(

@@ -88,8 +88,10 @@ branch name would serve yesterday's code from today's tag.
 Cloning inside the image also removes the last thing reaching out of the
 container. Public repositories only; no credentials are read or forwarded.
 
-A *local* workspace is still copied in and copied back out, since it is host
-data by definition. `run.mounts` remains as an explicit, opt-in escape hatch.
+There is no host-side workspace: a record's working directory always comes
+from an image. The working directory is copied back out after the run, so what
+the agent changed is on disk to inspect. `run.mounts` remains as an explicit,
+opt-in escape hatch for anything else.
 
 Housekeeping: `jormungandr prune` removes images this tool built, and
 `jormungandr reap` removes containers left by crashed runs — by default only those whose owning process is gone, so a

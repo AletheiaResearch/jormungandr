@@ -238,8 +238,8 @@ Two consequences worth knowing:
   prompt file is data, and data must not be able to write outside the run's
   output directory.
 
-`workspace` is also accepted directly, for a local directory — something
-Teich's format cannot express.
+`workspace` is the resolved form both spellings normalize into; it is rarely
+written by hand.
 
 **`image` is rejected at parse time.** Teich models the field and then raises
 "not supported yet" at use time, after the banner has printed and directories

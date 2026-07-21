@@ -125,47 +125,6 @@ def resolve_commit(clone_url: str, ref: str | None) -> str:
     raise ExecutionError(f"{clone_url} has no ref matching {target!r}")
 
 
-def _write_agents_md(workspace: Path, system: str) -> None:
-    """Deliver a system prompt through AGENTS.md.
-
-    For harnesses with no system-prompt flag — opencode's ``run`` exposes none.
-    Appended rather than overwritten: a cloned repository may ship its own
-    AGENTS.md, and silently discarding the project's instructions to inject
-    ours would change the agent's behaviour in a way nobody asked for.
-    """
-    target = workspace / "AGENTS.md"
-    existing = target.read_text(encoding="utf-8") if target.exists() else ""
-    separator = "\n\n" if existing and not existing.endswith("\n\n") else ""
-    target.write_text(existing + separator + system.rstrip() + "\n", encoding="utf-8")
-
-
-def _prepare_local_workspace(record: PromptRecord, directory: Path) -> Path | None:
-    """Materialize a *local* workspace under the record's output directory.
-
-    Only local directories come through here. A git workspace is a separate
-    image tier built by the daemon, so nothing is cloned on the host.
-
-    The directory is copied rather than used in place: an agent given the
-    caller's source tree edits it, and a run that mutates its own inputs cannot
-    be repeated.
-    """
-    spec = record.workspace
-    assert spec is not None  # set by the model validator
-    if spec.type != "local":
-        return None
-
-    target = directory / "workspace"
-    if target.exists():
-        shutil.rmtree(target)
-    source = Path(spec.path or "").expanduser()
-    if not source.is_dir():
-        raise ExecutionError(
-            f"{record.id}: workspace path is not a directory: {source}"
-        )
-    shutil.copytree(source, target, symlinks=True)
-    return target
-
-
 DEFAULT_WORKDIR = "/workspace"
 DEFAULT_USER = "agent"
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -185,34 +144,12 @@ def workdir_of(config: JormConfig) -> str:
     return DEFAULT_WORKDIR
 
 
-def _mount_target(mount: str) -> str:
-    """The container-side path of a ``host:container[:opts]`` mount string."""
-    parts = mount.split(":")
-    return parts[1] if len(parts) >= 2 else ""
-
-
-def _container_spec(
-    config: JormConfig, image: str, workspace: Path | None
-) -> ContainerSpec:
-    mounts = list(config.run.mounts)
-    if workspace is not None:
-        # The record's workspace is copied into the container, not mounted, so
-        # it contributes no mount here. run.mounts stays available as an
-        # explicit, opt-in escape hatch, but a colliding one would be shadowed
-        # by the copy without any sign of it.
-        target = workdir_of(config)
-        clashing = [m for m in mounts if _mount_target(m) == target]
-        if clashing:
-            raise ExecutionError(
-                f"run.mounts mounts {target!r} ({clashing[0]}), which is where "
-                "the record's workspace is copied. Remove that mount, or drop "
-                "the record's workspace/github_repo/git."
-            )
+def _container_spec(config: JormConfig, image: str) -> ContainerSpec:
     return ContainerSpec(
         image=image,
         env=dict(config.run.env),
         env_files=tuple(str(p) for p in config.run.env_files),
-        mounts=tuple(mounts),
+        mounts=tuple(config.run.mounts),
         network=config.run.network,  # type: ignore[arg-type]
         limits=ResourceLimits(cpus=config.run.cpus, memory=config.run.memory),
     )
@@ -318,7 +255,6 @@ def _run_one(
     directory.mkdir(parents=True, exist_ok=True)
 
     try:
-        workspace = _prepare_local_workspace(record, directory)
         # A record with a repository runs from its own workspace image, built
         # on the runtime one, so the checkout is cached across retries.
         image = _image_for(config, image, record, builder, directory, platform)
@@ -337,30 +273,17 @@ def _run_one(
 
     timeout = record.overrides.timeout or config.run.timeout
 
-    # System prompt delivery is per-harness: droid takes a flag, opencode has
-    # none and reads AGENTS.md from the working directory.
-    system = record.system
-    invocation = invocation_for(config.harness.name)
-    system_argv: str | None = None
-    if system:
-        if getattr(invocation, "system_via", "argv") == "agents_md":
-            if workspace is None:
-                workspace = directory / "workspace"
-                workspace.mkdir(parents=True, exist_ok=True)
-            _write_agents_md(workspace, system)
-        else:
-            system_argv = system
-
     try:
         run = runner.run(
             harness=config.harness.name,
             image=image,
             prompts=prompts,
-            system=system_argv,
+            # Delivered by the runner, which knows whether this harness takes a
+            # flag or needs a file written inside the container.
+            system=record.system,
             timeout=timeout,
-            container_spec=_container_spec(config, image, workspace),
+            container_spec=_container_spec(config, image),
             collect_state_to=directory / "state" if config.output.collect_state else None,
-            workspace=workspace,
             workdir=workdir_of(config),
         )
     except Exception as exc:  # noqa: BLE001 - one record failing must not end the run
