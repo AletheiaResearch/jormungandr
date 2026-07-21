@@ -228,27 +228,18 @@ def _container_spec(
 ) -> ContainerSpec:
     mounts = list(config.run.mounts)
     if workspace is not None:
-        # Docker resolves a bind-mount source host-side, so a symlinked source
-        # would expose whatever it points at. Belt and braces: the extraction
-        # path already refuses symlinks, and this catches any other route.
-        if workspace.is_symlink() or not workspace.is_dir():
-            raise ExecutionError(
-                f"workspace {workspace} is not a real directory; refusing to mount it"
-            )
+        # The record's workspace is copied into the container, not mounted, so
+        # it contributes no mount here. run.mounts stays available as an
+        # explicit, opt-in escape hatch, but a colliding one would be shadowed
+        # by the copy without any sign of it.
         target = workdir_of(config)
         clashing = [m for m in mounts if _mount_target(m) == target]
         if clashing:
-            # Two mounts on one path: Docker takes the last and discards the
-            # other silently, so the agent would get one of them with no
-            # indication which.
             raise ExecutionError(
-                f"run.mounts already mounts {target!r} ({clashing[0]}), which is "
-                "where the record's workspace goes. Remove that mount, or drop "
+                f"run.mounts mounts {target!r} ({clashing[0]}), which is where "
+                "the record's workspace is copied. Remove that mount, or drop "
                 "the record's workspace/github_repo/git."
             )
-        # :Z is deliberately omitted — it is SELinux-specific and breaks on
-        # Docker Desktop. The container user owns the copy via its uid.
-        mounts.append(f"{workspace}:{target}")
     return ContainerSpec(
         image=image,
         env=dict(config.run.env),
@@ -350,6 +341,8 @@ def _run_one(
             timeout=timeout,
             container_spec=_container_spec(config, image, workspace),
             collect_state_to=directory / "state" if config.output.collect_state else None,
+            workspace=workspace,
+            workdir=workdir_of(config),
         )
     except Exception as exc:  # noqa: BLE001 - one record failing must not end the run
         log.exception("record %s failed to run", record.id)

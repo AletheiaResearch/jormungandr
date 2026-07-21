@@ -330,10 +330,12 @@ class DockerCli:
             args += ["--tail", str(tail)]
         return self.run(args, check=False, timeout=120).stdout
 
-    def copy_in(self, source: Path, container: str, destination: str) -> None:
+    def copy_in(self, source: Path | str, container: str, destination: str) -> None:
+        # `source` is passed through verbatim: a trailing "/." is meaningful to
+        # `docker cp` and is destroyed by Path normalization.
         self.run(["cp", str(source), f"{container}:{destination}"], timeout=300)
 
-    def copy_out(self, container: str, source: str, destination: Path) -> None:
+    def copy_out(self, container: str, source: str, destination: Path | str) -> None:
         self.run(["cp", f"{container}:{source}", str(destination)], timeout=300)
 
     def exec(

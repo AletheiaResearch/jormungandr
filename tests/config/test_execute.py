@@ -52,7 +52,7 @@ class FakeRunner:
         self.fail_ids = fail_ids or set()
 
     def run(self, *, harness, image, prompts, timeout=None, container_spec=None,
-            collect_state_to=None, **kwargs):
+            collect_state_to=None, workspace=None, workdir=None, **kwargs):
         self.calls.append(
             {
                 "harness": harness,
@@ -61,6 +61,8 @@ class FakeRunner:
                 "timeout": timeout,
                 "spec": container_spec,
                 "collect": collect_state_to,
+                "workspace": workspace,
+                "workdir": workdir,
             }
         )
         failing = any(p in self.fail_ids for p in prompts)
@@ -242,7 +244,11 @@ class TestWorkspaces:
         copied = report.results[0].directory / "workspace" / "file.txt"
         assert copied.read_text() == "original"
         assert copied.resolve() != (source / "file.txt").resolve()
-        assert any("/workspace" in m for m in runner.calls[0]["spec"].mounts)
+        # Handed to the runner to copy in — not mounted. A bind mount's source
+        # is resolved host-side, so mounting is what made a symlinked source
+        # able to expose the host at all.
+        assert runner.calls[0]["workspace"] is not None
+        assert runner.calls[0]["spec"].mounts == ()
 
     def test_missing_local_workspace_fails_that_record_only(self, project: Path) -> None:
         record = PromptRecord(
@@ -420,7 +426,7 @@ class TestGitWorkspaces:
         record = PromptRecord(prompt="x", id="gh", github_repo="acme/app")
         assert record.workspace.git.clone_url == "https://github.com/acme/app"
 
-    def test_workspace_is_mounted(self, project, repo) -> None:
+    def test_workspace_is_copied_in_not_mounted(self, project, repo) -> None:
         runner = FakeRunner()
         execute(
             load(project),
@@ -429,15 +435,16 @@ class TestGitWorkspaces:
             runner=runner,
             available_env=ENV,
         )
-        assert any("/workspace" in m for m in runner.calls[0]["spec"].mounts)
+        assert runner.calls[0]["workspace"] is not None
+        assert runner.calls[0]["spec"].mounts == ()
 
 
 class TestMountCollisions:
     """The workspace mount must go where the agent actually works."""
 
-    def test_workspace_mounts_at_the_configured_workdir(self, project: Path, tmp_path) -> None:
-        # Hardcoding /workspace while the workdir module says otherwise hands
-        # the agent an empty directory and no error.
+    def test_workspace_targets_the_configured_workdir(self, project: Path, tmp_path) -> None:
+        # Hardcoding /workspace while the workdir module says otherwise puts
+        # the workspace where the agent is not looking, with no error.
         import json as _json
 
         config = _json.loads(_json.dumps(
@@ -459,11 +466,11 @@ class TestMountCollisions:
             runner=runner,
             available_env={"K"},
         )
-        assert any(m.endswith(":/srv/app") for m in runner.calls[0]["spec"].mounts)
+        assert runner.calls[0]["workdir"] == "/srv/app"
 
     def test_a_colliding_run_mount_is_an_error(self, project: Path, tmp_path) -> None:
-        # Docker takes the last of two mounts on one path and discards the
-        # other silently, so the agent gets one with no indication which.
+        # An explicit mount on the workdir would be shadowed by the copied-in
+        # workspace with no sign of it.
         (project / "jorm.yaml").write_text(
             CONFIG.replace("output:", "run:\n  mounts: ['/tmp/other:/workspace']\noutput:")
         )
@@ -478,7 +485,9 @@ class TestMountCollisions:
             available_env=ENV,
         )
         assert not report.ok
-        assert "already mounts" in (report.results[0].error or "")
+        assert "which is where the record's workspace is copied" in (
+            report.results[0].error or ""
+        )
 
     def test_a_run_mount_elsewhere_is_fine(self, project: Path, tmp_path) -> None:
         (project / "jorm.yaml").write_text(
@@ -496,7 +505,8 @@ class TestMountCollisions:
             available_env=ENV,
         )
         assert report.ok
-        assert len(runner.calls[0]["spec"].mounts) == 2
+        # only the user's explicit mount; the workspace is copied, not mounted
+        assert runner.calls[0]["spec"].mounts == ("/tmp/other:/data",)
 
     def test_run_mounts_alone_do_not_collide(self, project: Path) -> None:
         (project / "jorm.yaml").write_text(

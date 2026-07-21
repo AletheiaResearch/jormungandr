@@ -70,6 +70,14 @@ image     my-harness:runtime-cf174c9185 (cached)
 Each record gets a directory holding its workspace, raw per-turn output, a
 `result.json`, and the harness's own session record.
 
+A record's workspace is **copied into** the container and copied back out, not
+bind-mounted. A bind mount's source is resolved on the host, so a symlinked
+source exposes whatever it points at — and a repository decides what it stores
+at a path, so validating the config cannot prevent that. Copying makes the
+escape impossible rather than checked-for, and matches what a per-run container
+is for: nothing of the host is reachable from inside it. `run.mounts` remains
+as an explicit, opt-in escape hatch.
+
 Housekeeping: `jormungandr prune` removes images this tool built, and
 `jormungandr reap` removes containers left by crashed runs — by default only those whose owning process is gone, so a
 concurrent run is left alone.

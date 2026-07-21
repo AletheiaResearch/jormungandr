@@ -18,6 +18,7 @@ a separate concern with a separate contract.
 from __future__ import annotations
 
 import contextlib
+import shutil
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -106,6 +107,8 @@ class PromptRunner:
         network: str = "bridge",
         timeout: float | None = None,
         collect_state_to: Path | None = None,
+        workspace: Path | None = None,
+        workdir: str = "/workspace",
         invocation: HarnessInvocation | None = None,
         container_spec: ContainerSpec | None = None,
     ) -> HarnessRun:
@@ -131,6 +134,17 @@ class PromptRunner:
 
         turns: list[TurnResult] = []
         with self.runtime.session(spec) as session:
+            if workspace is not None:
+                # Copied in, not bind-mounted. A bind mount's *source* is
+                # resolved on the host, so a symlinked source exposes whatever
+                # it points at — and a repository decides what it stores at a
+                # path, so no amount of validating the config prevents that.
+                # A copied symlink resolves inside the container instead, which
+                # makes the whole class of escape impossible rather than
+                # checked for. It also matches what a per-run container is for:
+                # nothing of the host is reachable from inside it.
+                self._copy_workspace_in(session, workspace, workdir)
+
             for index, prompt in enumerate(prompts):
                 call = how.build(prompt, model=model, system=system)
                 result = self._exec(session, call, timeout=timeout)
@@ -144,6 +158,11 @@ class PromptRunner:
             artifacts = None
             if collect_state_to is not None:
                 artifacts = self._collect(session, how.state_paths, collect_state_to)
+            if workspace is not None:
+                # Bring back what the agent did. With a mount this was implicit;
+                # without one it has to be explicit, which is also the point at
+                # which "what changed?" becomes answerable.
+                self._copy_workspace_out(session, workdir, workspace)
 
         return HarnessRun(
             harness=harness,
@@ -168,6 +187,39 @@ class PromptRunner:
             timeout=timeout if timeout is not None else self.default_timeout,
             env=call.env or None,
         )
+
+    @staticmethod
+    def _copy_workspace_in(
+        session: ContainerSession, workspace: Path, workdir: str
+    ) -> None:
+        """Place the prepared workspace inside the container."""
+        # `docker cp src/. dest` copies the *contents*, so the workdir keeps
+        # the ownership and mode the image gave it.
+        session.copy_in(f"{workspace}/.", workdir)
+
+        # The copied files carry the *host* uid from the archive, so the
+        # container user usually cannot write to its own working directory.
+        # The owner has to be resolved in a normal exec: inside a `user=root`
+        # exec, `id -u` is 0, so chowning to `$(id -u)` there hands everything
+        # back to root and the agent still cannot write.
+        owner = session.exec(["sh", "-c", "id -u"]).stdout.strip()
+        group = session.exec(["sh", "-c", "id -g"]).stdout.strip()
+        if owner:
+            session.exec(
+                ["sh", "-c", f"chown -R {owner}:{group or owner} {workdir} || true"],
+                user="root",
+            )
+
+    @staticmethod
+    def _copy_workspace_out(
+        session: ContainerSession, workdir: str, destination: Path
+    ) -> None:
+        """Retrieve the working directory after the run."""
+        with contextlib.suppress(Exception):
+            if destination.exists():
+                shutil.rmtree(destination)
+            destination.mkdir(parents=True, exist_ok=True)
+            session.copy_out(f"{workdir}/.", destination)
 
     @staticmethod
     def _collect(

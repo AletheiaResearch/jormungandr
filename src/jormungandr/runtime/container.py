@@ -131,10 +131,13 @@ class ContainerSession:
         return self.exec([shell, "-c", script], timeout=timeout, **kwargs)
 
     def copy_in(self, source: Path | str, destination: str) -> None:
-        self._docker.copy_in(Path(source), self.container_id, destination)
+        # Not coerced through Path: `docker cp src/. dest` means "the contents
+        # of src", and Path("/a/b/.") normalizes to "/a/b", which silently
+        # turns that into "the directory b, placed inside dest".
+        self._docker.copy_in(str(source), self.container_id, destination)
 
     def copy_out(self, source: str, destination: Path | str) -> None:
-        self._docker.copy_out(self.container_id, source, Path(destination))
+        self._docker.copy_out(self.container_id, source, str(destination))
 
     def logs(self, *, tail: int | None = None) -> str:
         return self._docker.logs(self.container_id, tail=tail)
