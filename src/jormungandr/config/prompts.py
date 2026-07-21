@@ -59,11 +59,17 @@ class Workspace(BaseModel):
 
 
 class Overrides(BaseModel):
-    """Per-record overrides. Run config is the base; these win per key."""
+    """Per-record overrides. Run config is the base; these win per key.
+
+    Deliberately no per-record ``model``. Model selection is baked into the
+    image — droid resolves it from ``sessionDefaultSettings`` in a file that is
+    part of the image digest — so varying the model per record would mean a
+    separate image per record. Only knobs that cost nothing at run time live
+    here; to compare models, run the config twice.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    model: str | None = None
     timeout: float | None = Field(default=None, gt=0)
     max_turns: int | None = Field(default=None, gt=0)
 

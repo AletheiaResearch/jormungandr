@@ -453,8 +453,17 @@ class TestDroid:
         ).runtime.dockerfile
         assert "FACTORY_DROID_AUTO_UPDATE_ENABLED" not in out
 
-    def test_airgap_is_opt_in(self) -> None:
+    def test_airgap_is_on_by_default(self) -> None:
+        # Unlike droid's own default. This runtime runs agents against your own
+        # provider endpoints, where the Factory cloud call is pure failure
+        # surface — and its symptom is a bare "Exec failed".
         out = compose(spec(modules=[{"name": "node"}, {"name": "droid"}])).runtime.dockerfile
+        assert "FACTORY_AIRGAP_ENABLED=true" in out
+
+    def test_airgap_can_be_turned_off(self) -> None:
+        out = compose(
+            spec(modules=[{"name": "node"}, {"name": "droid", "airgap": False}])
+        ).runtime.dockerfile
         assert "FACTORY_AIRGAP_ENABLED" not in out
 
     def test_airgap_enables_byok_without_a_factory_account(self) -> None:
@@ -468,7 +477,7 @@ class TestDroid:
     def test_airgap_changes_the_digest(self) -> None:
         a = compose(spec(modules=[{"name": "node"}, {"name": "droid"}])).runtime.digest
         b = compose(
-            spec(modules=[{"name": "node"}, {"name": "droid", "airgap": True}])
+            spec(modules=[{"name": "node"}, {"name": "droid", "airgap": False}])
         ).runtime.digest
         assert a != b
 

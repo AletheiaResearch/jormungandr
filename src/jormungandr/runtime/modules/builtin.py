@@ -436,6 +436,13 @@ class Droid(Harness):
     Non-interactive use is ``droid exec``, which accepts a prompt on stdin.
     Credentials come from ``FACTORY_API_KEY`` at run time and are never baked.
 
+    **Airgap defaults on here**, unlike droid's own default. This runtime
+    exists to run agents in containers against your own provider endpoints,
+    where the Factory cloud call is pure failure surface: without airgap you
+    get a bare "Exec failed" and have to read a log file to discover it was a
+    401 from a service you were not trying to use. Set ``airgap: false`` to
+    restore cloud sync for a Factory account.
+
     **Airgap and BYOK.** droid can talk to an arbitrary OpenAI- or
     Anthropic-compatible endpoint via ``customModels`` in
     ``~/.factory/settings.json``, which avoids paying Factory for inference.
@@ -472,7 +479,7 @@ class Droid(Harness):
         package: str | None = None,
         name: str = "droid",
         auto_update: bool = False,
-        airgap: bool = False,
+        airgap: bool = True,
         requires: Sequence[str] = ("node",),
         config: Mapping[str, object] | None = None,
         home: str = "/home/agent",
