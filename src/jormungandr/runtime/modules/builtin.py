@@ -290,7 +290,9 @@ class Script:
         *,
         name: str = "script",
         filename: str | None = None,
-        shell: str = "/bin/bash",
+        # /bin/sh, not /bin/bash: alpine and other slim bases have no bash, and
+        # a module that only works on Debian derivatives is not a general one.
+        shell: str = "/bin/sh",
     ) -> None:
         if not content.strip():
             raise ModuleError("script module needs non-empty content")
