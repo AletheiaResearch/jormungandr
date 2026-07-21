@@ -107,37 +107,64 @@ def _prepare_workspace(record: PromptRecord, directory: Path) -> Path | None:
         shutil.copytree(source, target, symlinks=True)
         return target
 
-    target.mkdir(parents=True, exist_ok=True)
+    source = spec.git
+    assert source is not None  # guaranteed by Workspace validation
+
+    # Clone into a staging directory so `subdirectory` and `clone_as` can be
+    # applied before anything is mounted. Cloning straight into the final
+    # location would make "one directory out of a monorepo" impossible.
+    staging = directory / ".clone"
+    if staging.exists():
+        shutil.rmtree(staging)
     try:
         subprocess.run(
-            ["git", "clone", "--quiet", str(spec.repo), str(target)],
+            ["git", "clone", "--quiet", source.clone_url, str(staging)],
             check=True,
             capture_output=True,
             text=True,
             timeout=600,
         )
-        if spec.ref:
+        if source.ref:
             subprocess.run(
-                ["git", "-C", str(target), "checkout", "--quiet", str(spec.ref)],
+                ["git", "-C", str(staging), "checkout", "--quiet", source.ref],
                 check=True,
                 capture_output=True,
                 text=True,
                 timeout=120,
             )
         else:
-            # Teich's github_repo has no ref, so this is the compatible
-            # behaviour — but the same record clones different code tomorrow.
+            # github_repo has no ref, so this is the Teich-compatible default —
+            # but the same record clones different code tomorrow.
             log.warning(
                 "%s: cloning %s at its default branch; the run is not "
-                "reproducible. Pin a ref via workspace.ref.",
+                "reproducible. Pin git.ref.",
                 record.id,
-                spec.repo,
+                source.clone_url,
             )
     except subprocess.CalledProcessError as exc:
+        shutil.rmtree(staging, ignore_errors=True)
         raise ExecutionError(
-            f"{record.id}: could not prepare git workspace "
-            f"{spec.repo}@{spec.ref or 'default branch'}: {exc.stderr.strip()}"
+            f"{record.id}: could not clone {source.clone_url}"
+            f"@{source.ref or 'default branch'}: {exc.stderr.strip()}"
         ) from exc
+
+    content = staging
+    if source.subdirectory:
+        content = staging / source.subdirectory
+        if not content.is_dir():
+            shutil.rmtree(staging, ignore_errors=True)
+            raise ExecutionError(
+                f"{record.id}: subdirectory {source.subdirectory!r} does not exist "
+                f"in {source.clone_url}"
+                + (f" at {source.ref}" if source.ref else "")
+            )
+
+    destination = target / source.clone_as if source.clone_as else target
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(content), str(destination))
+    # Taking a subtree leaves the rest of the clone behind; a whole-repo move
+    # already took .git with it and leaves only an empty shell.
+    shutil.rmtree(staging, ignore_errors=True)
     return target
 
 

@@ -30,9 +30,39 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-__all__ = ["Overrides", "PromptRecord", "Turn", "Workspace", "load_prompts"]
+__all__ = [
+    "GitSource",
+    "Overrides",
+    "PromptRecord",
+    "Turn",
+    "Workspace",
+    "load_prompts",
+]
 
 GITHUB_REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def _safe_relative(value: str | None, *, field: str) -> str | None:
+    """Normalize a path that will be joined below the workspace directory.
+
+    Only ``..`` can actually escape: these values are always joined onto the
+    clone or workspace root, so a leading slash is sloppiness rather than an
+    absolute path — ``/pkg/api`` inside a repository plainly means ``pkg/api``,
+    and trimming it is friendlier than refusing it. ``..`` is rejected, because
+    a prompt file is data and must not be able to write outside the run's
+    output directory.
+    """
+    if value is None:
+        return None
+    cleaned = value.strip().strip("/")
+    if not cleaned:
+        return None
+    if ".." in Path(cleaned).parts:
+        raise ValueError(
+            f"{field} must stay inside the workspace; '..' is not allowed, "
+            f"got {value!r}"
+        )
+    return cleaned
 
 
 class Turn(BaseModel):
@@ -44,29 +74,69 @@ class Turn(BaseModel):
     content: str = Field(min_length=1)
 
 
-class Workspace(BaseModel):
-    """What the agent finds in its working directory.
+class GitSource(BaseModel):
+    """A repository to place in the agent's working directory.
 
-    Derived from ``github_repo``; also constructible directly for a local
-    directory, which Teich's format has no way to express.
+    Everything ``github_repo`` cannot express: a non-GitHub host, a pinned
+    revision, one directory out of a monorepo, and a chosen destination name.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    clone_url: str = Field(min_length=1)
+    """Any git URL — https, ssh, or a local path."""
+
+    ref: str | None = None
+    """Branch, tag or commit. Unset means the default branch, which makes the
+    run unreproducible: the same record clones different code tomorrow."""
+
+    subdirectory: str | None = None
+    """Use only this directory of the repository as the workspace content.
+
+    For monorepos. The extracted directory is not itself a git repository, so
+    the agent will not have history to inspect — that is inherent to taking a
+    subtree, not a limitation of the implementation.
+    """
+
+    clone_as: str | None = None
+    """Directory name the content lands in, below the working directory.
+
+    Unset puts the repository *at* the working directory root. Setting it gives
+    the agent ``/workspace/<clone_as>``, which is what you want when the repo
+    should sit alongside other material, or when a stable name matters more
+    than the repository's own.
+    """
+
+    @field_validator("subdirectory", "clone_as")
+    @classmethod
+    def _validate_relative(cls, value: str | None, info) -> str | None:
+        return _safe_relative(value, field=info.field_name)
+
+    @property
+    def has_history(self) -> bool:
+        """Whether the materialized workspace keeps its .git directory."""
+        return self.subdirectory is None
+
+
+class Workspace(BaseModel):
+    """What the agent finds in its working directory — the resolved form.
+
+    Produced from ``github_repo`` or ``git``; also constructible directly for a
+    local directory, which Teich's format has no way to express.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: Literal["none", "local", "git"] = "none"
     path: str | None = None
-    repo: str | None = None
-    ref: str | None = None
-    """Unset means the repository's default branch, as Teich does. That makes
-    the run unreproducible — the same record clones different code tomorrow —
-    so pin it when the result matters."""
+    git: GitSource | None = None
 
     @model_validator(mode="after")
     def _check_fields_match_type(self) -> Workspace:
         if self.type == "local" and not self.path:
             raise ValueError("workspace type 'local' requires 'path'")
-        if self.type == "git" and not self.repo:
-            raise ValueError("workspace type 'git' requires 'repo'")
+        if self.type == "git" and self.git is None:
+            raise ValueError("workspace type 'git' requires 'git'")
         return self
 
 
@@ -97,6 +167,7 @@ class PromptRecord(BaseModel):
 
     # --- additive, optional -------------------------------------------------
     id: str | None = None
+    git: GitSource | None = None
     workspace: Workspace | None = None
     overrides: Overrides = Field(default_factory=Overrides)
     tags: tuple[str, ...] = ()
@@ -156,14 +227,41 @@ class PromptRecord(BaseModel):
         )
 
     @model_validator(mode="after")
-    def _derive_workspace(self) -> PromptRecord:
-        if self.workspace is None:
-            derived = (
-                Workspace(type="git", repo=f"https://github.com/{self.github_repo}")
-                if self.github_repo
-                else Workspace()
+    def _resolve_workspace(self) -> PromptRecord:
+        """Exactly one workspace source, normalized into ``workspace``.
+
+        ``github_repo`` and ``git`` describe the same thing at different levels
+        of detail, so accepting both would mean silently picking a winner. A
+        record that sets more than one is a mistake worth naming.
+        """
+        explicit = self.workspace is not None and self.workspace.type != "none"
+        given = [
+            name
+            for name, present in (
+                ("github_repo", self.github_repo is not None),
+                ("git", self.git is not None),
+                ("workspace", explicit),
             )
-            object.__setattr__(self, "workspace", derived)
+            if present
+        ]
+        if len(given) > 1:
+            raise ValueError(
+                f"a record may set only one workspace source, got: {', '.join(given)}. "
+                "github_repo is shorthand for git; use whichever fits, not both."
+            )
+
+        if self.git is not None:
+            resolved = Workspace(type="git", git=self.git)
+        elif self.github_repo is not None:
+            resolved = Workspace(
+                type="git",
+                git=GitSource(clone_url=f"https://github.com/{self.github_repo}"),
+            )
+        elif explicit:
+            resolved = self.workspace  # type: ignore[assignment]
+        else:
+            resolved = Workspace()
+        object.__setattr__(self, "workspace", resolved)
         return self
 
     @property

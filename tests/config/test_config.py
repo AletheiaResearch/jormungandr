@@ -202,9 +202,9 @@ class TestPromptRecords:
     def test_github_repo_becomes_a_git_workspace(self) -> None:
         record = PromptRecord(prompt="x", github_repo="acme/app")
         assert record.workspace.type == "git"
-        assert record.workspace.repo == "https://github.com/acme/app"
+        assert record.workspace.git.clone_url == "https://github.com/acme/app"
         # Teich has no ref, so the default branch is used.
-        assert record.workspace.ref is None
+        assert record.workspace.git.ref is None
 
     def test_malformed_github_repo_rejected(self) -> None:
         with pytest.raises(ValidationError, match="owner/repo"):
@@ -418,7 +418,9 @@ class TestTeichFormatCompatibility:
     def test_github_repo_becomes_a_clonable_workspace(self) -> None:
         record = load_prompts(self.fixture)[2]
         assert record.workspace.type == "git"
-        assert record.workspace.repo.endswith("fastapi/full-stack-fastapi-template")
+        assert record.workspace.git.clone_url.endswith(
+            "fastapi/full-stack-fastapi-template"
+        )
 
     def test_system_prompt_is_kept(self) -> None:
         record = load_prompts(self.fixture)[3]
@@ -442,3 +444,84 @@ class TestTeichFormatCompatibility:
         from jormungandr.runtime.invocation import invocation_for
 
         assert invocation_for("opencode").system_via == "agents_md"
+
+
+class TestGitSource:
+    """The richer form: everything github_repo cannot express."""
+
+    def test_all_four_fields(self) -> None:
+        record = PromptRecord(
+            prompt="x",
+            git={
+                "clone_url": "git@git.example.com:team/mono.git",
+                "ref": "v2.1.0",
+                "subdirectory": "services/api",
+                "clone_as": "api",
+            },
+        )
+        source = record.workspace.git
+        assert source.clone_url == "git@git.example.com:team/mono.git"
+        assert source.ref == "v2.1.0"
+        assert source.subdirectory == "services/api"
+        assert source.clone_as == "api"
+
+    def test_non_github_hosts_work(self) -> None:
+        record = PromptRecord(prompt="x", git={"clone_url": "https://gitlab.com/a/b.git"})
+        assert record.workspace.git.clone_url == "https://gitlab.com/a/b.git"
+
+    def test_clone_url_is_required(self) -> None:
+        with pytest.raises(ValidationError):
+            PromptRecord(prompt="x", git={"ref": "main"})
+
+    def test_a_subtree_has_no_history(self) -> None:
+        # Inherent to taking a subtree, not an implementation limit.
+        whole = PromptRecord(prompt="x", git={"clone_url": "u"}).workspace.git
+        part = PromptRecord(
+            prompt="x", git={"clone_url": "u", "subdirectory": "pkg"}
+        ).workspace.git
+        assert whole.has_history and not part.has_history
+
+    def test_github_repo_and_git_are_exclusive(self) -> None:
+        # They describe the same thing at different detail levels; accepting
+        # both would mean silently picking a winner.
+        with pytest.raises(ValidationError, match="only one workspace source"):
+            PromptRecord(prompt="x", github_repo="a/b", git={"clone_url": "u"})
+
+    def test_git_and_local_workspace_are_exclusive(self) -> None:
+        with pytest.raises(ValidationError, match="only one workspace source"):
+            PromptRecord(
+                prompt="x",
+                git={"clone_url": "u"},
+                workspace={"type": "local", "path": "/src"},
+            )
+
+    def test_github_repo_and_local_workspace_are_exclusive(self) -> None:
+        with pytest.raises(ValidationError, match="only one workspace source"):
+            PromptRecord(
+                prompt="x", github_repo="a/b", workspace={"type": "local", "path": "/s"}
+            )
+
+    def test_an_explicit_none_workspace_is_not_a_conflict(self) -> None:
+        record = PromptRecord(prompt="x", github_repo="a/b", workspace={"type": "none"})
+        assert record.workspace.type == "git"
+
+    @pytest.mark.parametrize("bad", ["../escape", "a/../../b", "pkg/.."])
+    def test_parent_traversal_is_rejected(self, bad: str) -> None:
+        # A prompt file is data; it must not be able to write outside the run's
+        # output directory. `..` is the only segment that can actually escape.
+        with pytest.raises(ValidationError, match=r"\.\."):
+            PromptRecord(prompt="x", git={"clone_url": "u", "subdirectory": bad})
+        with pytest.raises(ValidationError, match=r"\.\."):
+            PromptRecord(prompt="x", git={"clone_url": "u", "clone_as": bad})
+
+    def test_surrounding_slashes_are_trimmed_not_rejected(self) -> None:
+        # These are always joined below the workspace root, so a leading slash
+        # is sloppiness rather than an absolute path.
+        record = PromptRecord(
+            prompt="x", git={"clone_url": "u", "subdirectory": "/pkg/api/"}
+        )
+        assert record.workspace.git.subdirectory == "pkg/api"
+
+    def test_unknown_git_key_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            PromptRecord(prompt="x", git={"clone_url": "u", "branch": "main"})

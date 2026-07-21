@@ -317,3 +317,116 @@ class TestOverrides:
         # would mean an image per record. Compare models by running twice.
         with pytest.raises(Exception):
             PromptRecord(id="w", prompt="x", overrides={"model": "other/model"})
+
+
+class TestGitWorkspaces:
+    """Exercised against real local git repositories — no network needed."""
+
+    @pytest.fixture
+    @staticmethod
+    def repo(tmp_path_factory) -> Path:
+        import subprocess
+
+        root = tmp_path_factory.mktemp("repo")
+        (root / "README.md").write_text("root readme\n")
+        pkg = root / "services" / "api"
+        pkg.mkdir(parents=True)
+        (pkg / "main.py").write_text("print('api')\n")
+        run = lambda *a: subprocess.run(  # noqa: E731
+            a, cwd=root, check=True, capture_output=True
+        )
+        run("git", "init", "--quiet", "-b", "main")
+        run("git", "config", "user.email", "t@example.com")
+        run("git", "config", "user.name", "T")
+        run("git", "add", "-A")
+        run("git", "commit", "--quiet", "-m", "first")
+        run("git", "tag", "v1.0.0")
+        (root / "README.md").write_text("changed after the tag\n")
+        run("git", "add", "-A")
+        run("git", "commit", "--quiet", "-m", "second")
+        return root
+
+    def execute_with(self, project: Path, git: dict):
+        return execute(
+            load(project),
+            records=[PromptRecord(prompt="x", id="w", git=git)],
+            builder=FakeBuilder(),
+            runner=FakeRunner(),
+            available_env=ENV,
+        )
+
+    def test_whole_repo_lands_at_the_workspace_root(self, project, repo) -> None:
+        report = self.execute_with(project, {"clone_url": str(repo)})
+        workspace = report.results[0].directory / "workspace"
+        assert (workspace / "README.md").exists()
+        # A full clone keeps its history, so the agent can diff and commit.
+        assert (workspace / ".git").is_dir()
+
+    def test_ref_is_checked_out(self, project, repo) -> None:
+        report = self.execute_with(project, {"clone_url": str(repo), "ref": "v1.0.0"})
+        readme = report.results[0].directory / "workspace" / "README.md"
+        assert readme.read_text() == "root readme\n"
+
+    def test_default_branch_without_a_ref(self, project, repo) -> None:
+        report = self.execute_with(project, {"clone_url": str(repo)})
+        readme = report.results[0].directory / "workspace" / "README.md"
+        assert readme.read_text() == "changed after the tag\n"
+
+    def test_subdirectory_becomes_the_workspace(self, project, repo) -> None:
+        report = self.execute_with(
+            project, {"clone_url": str(repo), "subdirectory": "services/api"}
+        )
+        workspace = report.results[0].directory / "workspace"
+        assert (workspace / "main.py").exists()
+        assert not (workspace / "README.md").exists()
+        # A subtree is not a repository; no history comes with it.
+        assert not (workspace / ".git").exists()
+
+    def test_clone_as_nests_the_content(self, project, repo) -> None:
+        report = self.execute_with(project, {"clone_url": str(repo), "clone_as": "app"})
+        workspace = report.results[0].directory / "workspace"
+        assert (workspace / "app" / "README.md").exists()
+        assert not (workspace / "README.md").exists()
+
+    def test_subdirectory_and_clone_as_together(self, project, repo) -> None:
+        report = self.execute_with(
+            project,
+            {"clone_url": str(repo), "ref": "v1.0.0",
+             "subdirectory": "services/api", "clone_as": "api"},
+        )
+        workspace = report.results[0].directory / "workspace"
+        assert (workspace / "api" / "main.py").exists()
+
+    def test_missing_subdirectory_fails_that_record_clearly(self, project, repo) -> None:
+        report = self.execute_with(
+            project, {"clone_url": str(repo), "subdirectory": "does/not/exist"}
+        )
+        assert not report.ok
+        assert "does/not/exist" in (report.results[0].error or "")
+
+    def test_bad_ref_fails_that_record(self, project, repo) -> None:
+        report = self.execute_with(project, {"clone_url": str(repo), "ref": "nope"})
+        assert not report.ok
+        assert "could not clone" in (report.results[0].error or "")
+
+    def test_staging_directory_is_cleaned_up(self, project, repo) -> None:
+        report = self.execute_with(
+            project, {"clone_url": str(repo), "subdirectory": "services/api"}
+        )
+        assert not (report.results[0].directory / ".clone").exists()
+
+    def test_github_repo_shorthand_reaches_the_same_path(self, project, repo) -> None:
+        # github_repo desugars to a GitSource, so it walks the same code.
+        record = PromptRecord(prompt="x", id="gh", github_repo="acme/app")
+        assert record.workspace.git.clone_url == "https://github.com/acme/app"
+
+    def test_workspace_is_mounted(self, project, repo) -> None:
+        runner = FakeRunner()
+        execute(
+            load(project),
+            records=[PromptRecord(prompt="x", id="w", git={"clone_url": str(repo)})],
+            builder=FakeBuilder(),
+            runner=runner,
+            available_env=ENV,
+        )
+        assert any("/workspace" in m for m in runner.calls[0]["spec"].mounts)

@@ -182,7 +182,7 @@ unchanged:
 | `prompt` | string, required | The first turn. |
 | `follow_up_prompts` | string[] | Further turns in the same session. |
 | `system` | string | System/developer instruction. The literal `"none"` means unset, as in Teich. |
-| `github_repo` | `owner/repo` | Cloned into the working directory. |
+| `github_repo` | `owner/repo` | Cloned into the working directory. Shorthand for `git`. |
 | `image` | string | Present in Teich's schema; rejected here, see below. |
 
 Verified against Teich's real files: `examples/prompts.jsonl` (196 records, 143
@@ -201,8 +201,45 @@ Two optional additions, neither required by a Teich file:
   `model`: model selection is baked into the image, so varying it per record
   would mean an image per record. To compare models, run the config twice.
 
+### Repositories: `github_repo` or `git`
+
+`github_repo` is kept for Teich compatibility and is shorthand for the richer
+`git` object, which expresses what it cannot:
+
+```jsonl
+{"prompt": "Fix the API", "git": {
+  "clone_url": "git@git.example.com:team/mono.git",
+  "ref": "v2.1.0",
+  "subdirectory": "services/api",
+  "clone_as": "api"
+}}
+```
+
+| Field | Meaning |
+|---|---|
+| `clone_url` | Any git URL — https, ssh, or a local path. Not just GitHub. |
+| `ref` | Branch, tag or commit. Unset means the default branch, which makes the run unreproducible. |
+| `subdirectory` | Use one directory of the repo as the content. For monorepos. |
+| `clone_as` | Directory the content lands in, below the working directory. Unset puts the repo at the root. |
+
+`github_repo`, `git` and a local `workspace` are **mutually exclusive** — they
+describe the same thing at different levels of detail, so accepting more than
+one would mean silently picking a winner. A record that sets two is an error
+that names both.
+
+Two consequences worth knowing:
+
+- **A subtree has no history.** `subdirectory` extracts a directory out of the
+  clone, and the result is not a git repository, so the agent cannot diff or
+  commit. That is inherent to taking a subtree. A whole-repo clone keeps `.git`.
+- **`..` is rejected in `subdirectory` and `clone_as`;** a leading `/` is
+  trimmed rather than refused, since these are always joined below the
+  workspace root and `/pkg/api` inside a repository plainly means `pkg/api`. A
+  prompt file is data, and data must not be able to write outside the run's
+  output directory.
+
 `workspace` is also accepted directly, for a local directory — something
-Teich's format cannot express. `github_repo` is sugar for the git form.
+Teich's format cannot express.
 
 **`image` is rejected at parse time.** Teich models the field and then raises
 "not supported yet" at use time, after the banner has printed and directories
