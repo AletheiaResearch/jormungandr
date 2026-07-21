@@ -1,0 +1,32 @@
+# A harness image with Langfuse tracing layered in.
+#
+# The point of the module registry: tracing is one opt-in entry, not an
+# `ARG INSTALL_LANGFUSE=0` threaded through if-branches inside every RUN layer.
+# Removing the `langfuse` entry below removes it completely, and changes the
+# image digest so the untraced image is a separate, cached artifact.
+#
+# Only the OTLP endpoint is baked in. Keys are supplied per run:
+#
+#   printf 'LANGFUSE_PUBLIC_KEY=pk-...\nLANGFUSE_SECRET_KEY=sk-...\n' > lf.env
+#   chmod 600 lf.env
+#   jormungandr container run <image> --env-file lf.env
+base_image: node:22-bookworm-slim
+repository: jormungandr
+
+modules:
+  - name: apt
+    packages: [git, curl, ca-certificates]
+
+  - name: node
+    preinstalled: true
+
+  - name: python
+
+  - name: agent
+    harness: claude-code
+    version: "2.0.1"
+
+  - name: langfuse
+    host: https://cloud.langfuse.com
+
+  - name: workspace

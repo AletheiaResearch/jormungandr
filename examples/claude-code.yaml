@@ -1,0 +1,25 @@
+# A Claude Code harness image.
+#
+#   jormungandr image build examples/claude-code.yaml
+#
+# Credentials are never baked in. Supply them at run time:
+#
+#   printf 'ANTHROPIC_API_KEY=sk-ant-...\n' > secrets.env && chmod 600 secrets.env
+#   jormungandr container run <image> --env-file secrets.env --name work
+base_image: node:22-bookworm-slim
+repository: jormungandr
+
+modules:
+  - name: apt
+    packages: [git, curl, ca-certificates, jq, ripgrep]
+
+  - name: node
+    preinstalled: true
+
+  - name: agent
+    harness: claude-code
+    version: "2.0.1"
+
+  - name: workspace
+    path: /workspace
+    user: agent
