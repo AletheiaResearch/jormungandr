@@ -1,5 +1,9 @@
 """CLI declarations. Stdlib + cyclopts imports only — command bodies
-import their implementations lazily so --help stays fast."""
+import their implementations lazily so --help stays fast.
+
+No commands are wired up yet: the runtime is still internals-only. Commands
+land here once there is a user-facing workflow to expose.
+"""
 
 from __future__ import annotations
 
