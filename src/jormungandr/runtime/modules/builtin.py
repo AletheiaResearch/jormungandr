@@ -433,9 +433,13 @@ class Workspace:
         self.user = _safe_token(user, what="workspace user")
         self.uid = _safe_uid(uid)
 
+    @property
+    def home(self) -> str:
+        return f"/home/{self.user}"
+
     def instructions(self, context: BuildContext) -> Sequence[Instruction]:
         return [
-            Comment(f"workspace {self.path} owned by {self.user}"),
+            Comment(f"workspace {self.path} owned by {self.user} (HOME={self.home})"),
             # Node base images already ship a uid-1000 'node' user, so a plain
             # `useradd --uid 1000` fails there. `|| true` would swallow that and
             # leave a Dockerfile whose USER instruction then fails. Create the
@@ -446,16 +450,24 @@ class Workspace:
                     f"if ! id -u {self.user} >/dev/null 2>&1; then "
                     f"useradd --create-home --non-unique --uid {self.uid} "
                     f"--shell /bin/bash {self.user}; fi",
-                    f"mkdir -p {self.path}",
-                    f"chown -R {self.uid} {self.path}",
+                    f"mkdir -p {self.path} {self.home}",
+                    f"chown -R {self.uid} {self.path} {self.home}",
                 ]
             ),
             Workdir(self.path),
             User(self.user),
+            # HOME must be explicit. Docker derives it from /etc/passwd, which
+            # resolves a uid to the *first* matching name — and --non-unique
+            # means two names share this uid, so `USER agent` on a node base
+            # image otherwise yields HOME=/home/node. Harnesses keep their
+            # state and credentials under HOME (~/.factory, ~/.local/share/
+            # opencode), so a wrong HOME silently sends them somewhere the
+            # image never prepared.
+            Env({"HOME": self.home}),
         ]
 
     def identity(self) -> Mapping[str, object]:
-        return {"path": self.path, "user": self.user, "uid": self.uid}
+        return {"path": self.path, "user": self.user, "uid": self.uid, "home": self.home}
 
 
 def register_builtins(registry=REGISTRY) -> None:

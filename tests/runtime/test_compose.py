@@ -399,3 +399,34 @@ class TestInjectionResistance:
 
         with pytest.raises(DockerfileError, match="newline"):
             compose(spec(labels={"a": "1\nUSER root"}))
+
+
+class TestWorkspaceHome:
+    """HOME must be explicit, not inferred from /etc/passwd.
+
+    Docker resolves HOME by mapping the uid to the *first* matching name, and
+    --non-unique means two names share uid 1000 on a node base image. `USER
+    agent` therefore yielded HOME=/home/node. Harnesses keep state and
+    credentials under HOME (~/.factory, ~/.local/share/opencode), so a wrong
+    HOME silently sends them somewhere the image never prepared.
+    """
+
+    def test_home_is_set_explicitly(self) -> None:
+        out = compose(spec(modules=[{"name": "workspace"}])).runtime.dockerfile
+        assert "ENV HOME=/home/agent" in out
+
+    def test_home_follows_the_user(self) -> None:
+        out = compose(
+            spec(modules=[{"name": "workspace", "user": "runner"}])
+        ).runtime.dockerfile
+        assert "ENV HOME=/home/runner" in out
+
+    def test_home_is_created_and_owned(self) -> None:
+        out = compose(spec(modules=[{"name": "workspace"}])).runtime.dockerfile
+        assert "mkdir -p /workspace /home/agent" in out
+        assert "chown -R 1000 /workspace /home/agent" in out
+
+    def test_home_is_in_the_digest(self) -> None:
+        a = compose(spec(modules=[{"name": "workspace", "user": "a"}])).runtime.digest
+        b = compose(spec(modules=[{"name": "workspace", "user": "b"}])).runtime.digest
+        assert a != b
