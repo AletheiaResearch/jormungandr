@@ -1,0 +1,17 @@
+{
+  "error": null,
+  "id": "w",
+  "ok": true,
+  "state_paths": [
+    ".factory/sessions"
+  ],
+  "turns": [
+    {
+      "duration": 0.1,
+      "exit_code": 0,
+      "index": 0,
+      "timed_out": false,
+      "truncated": false
+    }
+  ]
+}

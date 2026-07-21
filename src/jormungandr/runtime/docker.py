@@ -249,6 +249,23 @@ class DockerCli:
         """
         return str(self.inspect(reference).get("Id", ""))
 
+    def image_label(self, reference: str, label: str) -> str:
+        """One label off an image, or "" if absent or the image is gone."""
+        # json.dumps, not repr: Go templates need double quotes, and %r
+        # produces single ones — which silently yields an empty result rather
+        # than an error.
+        quoted = json.dumps(label)
+        proc = self.run(
+            ["image", "inspect", "--format", f"{{{{index .Config.Labels {quoted}}}}}",
+             reference],
+            check=False,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            return ""
+        value = proc.stdout.strip()
+        return "" if value in {"", "<no value>"} else value
+
     def list_images(self, *, label: str | None = None) -> list[dict[str, str]]:
         args = ["image", "ls", "--format", "{{json .}}"]
         if label:
@@ -313,10 +330,12 @@ class DockerCli:
             args += ["--tail", str(tail)]
         return self.run(args, check=False, timeout=120).stdout
 
-    def copy_in(self, source: Path, container: str, destination: str) -> None:
+    def copy_in(self, source: Path | str, container: str, destination: str) -> None:
+        # `source` is passed through verbatim: a trailing "/." is meaningful to
+        # `docker cp` and is destroyed by Path normalization.
         self.run(["cp", str(source), f"{container}:{destination}"], timeout=300)
 
-    def copy_out(self, container: str, source: str, destination: Path) -> None:
+    def copy_out(self, container: str, source: str, destination: Path | str) -> None:
         self.run(["cp", f"{container}:{source}", str(destination)], timeout=300)
 
     def exec(
@@ -329,6 +348,7 @@ class DockerCli:
         workdir: str | None = None,
         env: Mapping[str, str] | None = None,
         max_output: int = 10 * 1024 * 1024,
+        stdin: str | None = None,
     ) -> CommandResult:
         """Run a command in a container, with a real timeout and a real exit code.
 
@@ -342,6 +362,10 @@ class DockerCli:
           object, so a chatty process can exhaust host memory.
         """
         args = ["exec"]
+        if stdin is not None:
+            # Without -i the container's stdin is closed immediately, so a
+            # harness reading its prompt from stdin sees EOF and does nothing.
+            args.append("-i")
         if user:
             args += ["--user", user]
         if workdir:
@@ -356,6 +380,7 @@ class DockerCli:
         try:
             proc = subprocess.Popen(
                 argv,
+                stdin=subprocess.PIPE if stdin is not None else None,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -363,6 +388,14 @@ class DockerCli:
             )
         except FileNotFoundError as exc:
             raise DockerNotAvailable(f"{self.executable!r} not found on PATH") from exc
+
+        if stdin is not None and proc.stdin is not None:
+            # Write and close before waiting: the harness blocks until it sees
+            # EOF, and we block until it exits, so leaving the pipe open
+            # deadlocks both sides.
+            with contextlib.suppress(BrokenPipeError, OSError):
+                proc.stdin.write(stdin)
+                proc.stdin.close()
 
         # Drain both pipes in threads, discarding past the cap as we go.
         # proc.communicate() would buffer the entire stream before any

@@ -21,11 +21,22 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from jormungandr.runtime.compose import ComposedImage, ComposedLayer, compose
+from jormungandr.runtime.compose import (
+    BASE_TIER,
+    RUNTIME_TIER,
+    WORKSPACE_TIER,
+    ComposedImage,
+    ComposedLayer,
+    compose,
+)
+from jormungandr.runtime.identity import LABEL_NAMESPACE
 from jormungandr.runtime.docker import DockerCli, DockerError
 from jormungandr.runtime.spec import ImageSpec
 
 __all__ = ["BuildError", "BuildResult", "ImageBuilder", "LayerResult"]
+
+MANAGED_LABEL = f"{LABEL_NAMESPACE}.managed"
+DIGEST_LABEL = f"{LABEL_NAMESPACE}.digest"
 
 
 def _dockerignore(context_files: Sequence[str]) -> str:
@@ -165,6 +176,25 @@ class ImageBuilder:
             compose(spec), force=force, on_output=on_output, extra_args=extra_args
         )
 
+    def build_layer(
+        self,
+        layer: ComposedLayer,
+        *,
+        platform: str,
+        force: bool = False,
+        on_output: Callable[[str], None] | None = None,
+    ) -> LayerResult:
+        """Build a single tier that was composed outside an ImageSpec."""
+        self.docker.require()
+        return self._build_layer(
+            layer,
+            platform=platform,
+            build_args={},
+            force=force,
+            on_output=on_output,
+            extra_args=(),
+        )
+
     def build_composed(
         self,
         composed: ComposedImage,
@@ -258,25 +288,54 @@ class ImageBuilder:
     # -- housekeeping -----------------------------------------------------
 
     def managed_images(self) -> list[dict[str, str]]:
-        """Images this tool created, found by label rather than name prefix."""
-        return self.docker.list_images(label="dev.jormungandr.managed=true")
+        """Images this tool actually built.
+
+        The label alone is not sufficient. Docker propagates a parent image's
+        LABELs into any child, so a user image built ``FROM`` one of ours also
+        carries ``dev.jormungandr.managed=true`` and would be collected — an
+        irreversible force-delete of something we did not create.
+
+        The discriminator is that we embed the digest in the tag as well as in
+        a label. A derived image inherits the *parent's* digest label, which
+        cannot match the digest in its own tag, so requiring the two to agree
+        keeps exactly the images this tool produced.
+        """
+        ours: list[dict[str, str]] = []
+        for image in self.docker.list_images(label=f"{MANAGED_LABEL}=true"):
+            tag = str(image.get("Tag", ""))
+            digest = self.docker.image_label(
+                f"{image.get('Repository')}:{tag}", DIGEST_LABEL
+            )
+            if digest and tag.endswith(digest):
+                ours.append(image)
+        return ours
 
     def prune(self, *, keep: Sequence[str] = ()) -> list[str]:
         """Remove managed images except those in ``keep``.
 
-        Only ever touches images carrying our label, so a user's unrelated
-        images cannot be collected. SWE-bench classifies by name prefix and
-        will happily delete anything that happens to share it.
+        Only ever touches images this tool built — see :meth:`managed_images`,
+        which requires more than the label because Docker propagates labels
+        into derived images.
 
-        Runtime images are removed before base images, since a base cannot be
-        deleted while something is built on it.
+        Removed newest-tier first: a tier cannot be deleted while another is
+        built on it, and there are three of them, so distinguishing only
+        "base or not" would leave runtime and workspace in arbitrary order and
+        fail whenever runtime came first.
         """
         preserved = set(keep)
         removed: list[str] = []
         images = self.managed_images()
 
+        # Deepest dependant first. An unrecognised tag sorts with the leaves,
+        # so an unknown future tier is removed before what it might build on.
+        depth = {f"{BASE_TIER}-": 0, f"{RUNTIME_TIER}-": 1, f"{WORKSPACE_TIER}-": 2}
+
         def tier_of(image: dict[str, str]) -> int:
-            return 0 if str(image.get("Tag", "")).startswith("base-") else 1
+            tag = str(image.get("Tag", ""))
+            for prefix, rank in depth.items():
+                if tag.startswith(prefix):
+                    return rank
+            return max(depth.values())
 
         for image in sorted(images, key=tier_of, reverse=True):
             reference = f"{image.get('Repository')}:{image.get('Tag')}"

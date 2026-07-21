@@ -24,8 +24,15 @@ def require(module: str, extra: str) -> Any:
 
 
 def configure_logging(*, verbose: bool = False) -> None:
+    """Quiet by default.
+
+    Commands print their own progress in a form meant to be read; internal INFO
+    logs carry a level and a logger name that only add noise beside it. At
+    WARNING the default output is exactly what the command chose to say, and
+    anything genuinely unexpected still surfaces.
+    """
     logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
+        level=logging.DEBUG if verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
@@ -35,14 +42,37 @@ def install_error_handler() -> None:
     if os.environ.get("JORMUNGANDR_TRACEBACK"):
         return
 
-    expected = (MissingExtra, FileNotFoundError, PermissionError, ValueError)
+    always = (MissingExtra, FileNotFoundError, PermissionError, ValueError)
+
+    def _expected() -> tuple[type[BaseException], ...]:
+        """Resolve the runtime error types only once something has failed.
+
+        ExecutionError, BuildError and DockerError are RuntimeErrors, so they
+        must be named explicitly rather than catching RuntimeError wholesale —
+        a genuine internal bug should still produce a traceback. But importing
+        them at install time would drag the whole docker stack into every
+        invocation, including `--help`, which is exactly what keeping cli.py to
+        declarations was meant to avoid. Nothing has failed yet at install
+        time, so nothing needs importing yet.
+        """
+        extra: list[type[BaseException]] = []
+        for module, name in (
+            ("jormungandr.execute", "ExecutionError"),
+            ("jormungandr.runtime.build", "BuildError"),
+            ("jormungandr.runtime.docker", "DockerError"),
+        ):
+            try:
+                extra.append(getattr(import_module(module), name))
+            except Exception:  # noqa: BLE001 - reporting must not itself fail
+                continue
+        return always + tuple(extra)
 
     def hook(exc_type, exc, tb):
         if issubclass(exc_type, KeyboardInterrupt):
             raise SystemExit(130)
         if issubclass(exc_type, BrokenPipeError):
             raise SystemExit(0)
-        if issubclass(exc_type, expected):
+        if issubclass(exc_type, _expected()):
             print(f"error: {exc}", file=sys.stderr)
             raise SystemExit(1)
         sys.__excepthook__(exc_type, exc, tb)

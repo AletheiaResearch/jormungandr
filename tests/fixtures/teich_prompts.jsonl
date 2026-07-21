@@ -1,0 +1,5 @@
+{"prompt": "Build a small CLI that counts words in a file."}
+{"prompt": "Draft a project plan for a data pipeline.", "follow_up_prompts": ["Can you draw some mermaid diagrams to illustrate it?", "Now add a risk checklist"]}
+{"prompt": "Add tests to this repo.", "github_repo": "fastapi/full-stack-fastapi-template"}
+{"prompt": "Write a landing page.", "system": "You are a terse frontend engineer. Prefer plain HTML."}
+{"prompt": "Explain the code.", "system": "none"}

@@ -85,6 +85,7 @@ class ContainerSession:
         workdir: str | None = None,
         env: Mapping[str, str] | None = None,
         max_output: int = 10 * 1024 * 1024,
+        stdin: str | None = None,
     ) -> CommandResult:
         """Run a command inside the container."""
         return self._docker.exec(
@@ -95,7 +96,23 @@ class ContainerSession:
             workdir=workdir,
             env=env,
             max_output=max_output,
+            stdin=stdin,
         )
+
+    def exec_with_stdin(
+        self,
+        command: Sequence[str],
+        *,
+        stdin: str | None,
+        timeout: float | None = None,
+        **kwargs,
+    ) -> CommandResult:
+        """Run a command, feeding ``stdin`` to it.
+
+        Prompts travel this way rather than on argv, where they would be
+        visible in the host process table and recorded in `docker inspect`.
+        """
+        return self.exec(command, timeout=timeout, stdin=stdin, **kwargs)
 
     def shell(
         self,
@@ -114,10 +131,13 @@ class ContainerSession:
         return self.exec([shell, "-c", script], timeout=timeout, **kwargs)
 
     def copy_in(self, source: Path | str, destination: str) -> None:
-        self._docker.copy_in(Path(source), self.container_id, destination)
+        # Not coerced through Path: `docker cp src/. dest` means "the contents
+        # of src", and Path("/a/b/.") normalizes to "/a/b", which silently
+        # turns that into "the directory b, placed inside dest".
+        self._docker.copy_in(str(source), self.container_id, destination)
 
     def copy_out(self, source: str, destination: Path | str) -> None:
-        self._docker.copy_out(self.container_id, source, Path(destination))
+        self._docker.copy_out(self.container_id, source, str(destination))
 
     def logs(self, *, tail: int | None = None) -> str:
         return self._docker.logs(self.container_id, tail=tail)
@@ -207,7 +227,17 @@ class ContainerRuntime:
             with self._lock:
                 self._live[container_id] = session
         if start:
-            self.docker.start(container_id)
+            try:
+                self.docker.start(container_id)
+            except Exception:
+                # The container exists but never ran. An untracked one is
+                # invisible to shutdown(), and a tracked one is only reaped at
+                # exit — either way it lingers, so remove it now and let the
+                # failure propagate.
+                session.remove()
+                with self._lock:
+                    self._live.pop(container_id, None)
+                raise
         return session
 
     def release(self, session: ContainerSession) -> None:
@@ -286,8 +316,15 @@ class ContainerRuntime:
     # -- reaping ----------------------------------------------------------
 
     def managed_containers(self) -> list[dict[str, str]]:
-        """Containers this tool created, found by label rather than by name."""
-        return self.docker.list_containers(label=f"{MANAGED_LABEL}=true")
+        """Containers this tool created.
+
+        Filtered on the *session* label, not ``managed``. A container inherits
+        its image's labels, so anything a user runs from a jormungandr-built
+        image carries ``managed=true`` too and would be swept. The session
+        label is written at container-create time and cannot come from an
+        image, so it identifies containers we actually started.
+        """
+        return self.docker.list_containers(label=f"{SESSION_LABEL}")
 
     def reap_orphans(self, *, owner: str | None = None, all_owners: bool = False) -> list[str]:
         """Remove managed containers left behind by dead processes.

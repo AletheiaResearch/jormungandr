@@ -12,6 +12,7 @@ builder cannot express this.
 
 from __future__ import annotations
 
+import json
 import shlex
 from collections.abc import Mapping, Sequence
 
@@ -23,13 +24,14 @@ from jormungandr.runtime.layers import (
     Instruction,
     Run,
     User,
-    Workdir,
+    Workdir as Workdir_,
 )
 from jormungandr.runtime.modules.base import BuildContext, ModuleError, Stage
 from jormungandr.runtime.modules.installers import Installer, NpmGlobal
 from jormungandr.runtime.modules.registry import REGISTRY
 
 __all__ = [
+    "Droid",
     "Harness",
     "OpenCode",
     "AptPackages",
@@ -37,7 +39,8 @@ __all__ = [
     "NodeToolchain",
     "PythonToolchain",
     "Script",
-    "Workspace",
+    "UserAccount",
+    "Workdir",
     "register_builtins",
 ]
 
@@ -241,6 +244,9 @@ class Harness:
 
     stage = Stage.HARNESS
 
+    CONFIG_PATH: str | None = None
+    """Where this harness reads its config, relative to HOME."""
+
     def __init__(
         self,
         *,
@@ -249,6 +255,9 @@ class Harness:
         binary: str,
         verify: Sequence[str] = ("--version",),
         requires: Sequence[str] | None = None,
+        config: Mapping[str, object] | None = None,
+        home: str = "/home/agent",
+        owner: str = "agent",
     ) -> None:
         self.name = name
         self.installer = installer
@@ -257,12 +266,49 @@ class Harness:
         self.requires = tuple(
             requires if requires is not None else installer.default_requires
         )
+        self.config = dict(config) if config else None
+        self.home = _safe_token(home, what="harness home")
+        self.owner = _safe_token(owner, what="harness config owner")
+        if self.config is not None and self.CONFIG_PATH is None:
+            raise ModuleError(f"harness {name!r} does not accept a config document")
+
+    def config_document(self) -> str | None:
+        """The harness's config file content, or None.
+
+        Serialized canonically (`sort_keys`) for the same reason
+        `identity.canonical_json` exists: an unstable byte representation means
+        an unstable digest and a rebuild on every invocation.
+        """
+        if self.config is None:
+            return None
+        return json.dumps(self.config, sort_keys=True, indent=2) + "\n"
+
+    def _config_instructions(self, context: BuildContext) -> list[Instruction]:
+        document = self.config_document()
+        if document is None or self.CONFIG_PATH is None:
+            return []
+        # A real context file rather than a printf inside a RUN: reviewable in
+        # the build context, and part of the digest.
+        staged = context.add_file(f"{self.name}.config.json", document)
+        target = f"{self.home}/{self.CONFIG_PATH}"
+        parent = target.rsplit("/", 1)[0]
+        return [
+            Comment(f"{self.name} config -> {target}"),
+            # The directory must be chowned too, not just the file. `mkdir -p`
+            # runs as root and `COPY --chown` only affects what it copies, so
+            # the config would land inside a root-owned directory — and
+            # harnesses write siblings next to their config (droid creates
+            # .factory/sessions on first run) and fail with EACCES.
+            Run([f"mkdir -p {parent}", f"chown -R {self.owner} {self.home}"]),
+            Copy(staged, target, chown=self.owner),
+        ]
 
     def instructions(self, context: BuildContext) -> Sequence[Instruction]:
         body: list[Instruction] = [
             Comment(f"harness: {self.name} ({self.installer.identity().get('kind')})"),
             *self.installer.instructions(context),
         ]
+        body.extend(self._config_instructions(context))
         if self.verify:
             # Fail the build here rather than at run time. Installers lie: npm
             # exits 0 even when no platform-specific optional binary matched,
@@ -276,6 +322,8 @@ class Harness:
             "binary": self.binary,
             "verify": list(self.verify),
             "installer": dict(self.installer.identity()),
+            "config": self.config,
+            "home": self.home,
         }
 
 
@@ -297,6 +345,7 @@ class OpenCode(Harness):
     PACKAGE = "opencode-ai"
     BINARY = "opencode"
     DEFAULT_VERSION = "1.18.4"
+    CONFIG_PATH = ".config/opencode/opencode.json"
 
     def __init__(
         self,
@@ -305,13 +354,207 @@ class OpenCode(Harness):
         package: str | None = None,
         name: str = "opencode",
         requires: Sequence[str] = ("node",),
+        config: Mapping[str, object] | None = None,
+        home: str = "/home/agent",
+        owner: str = "agent",
     ) -> None:
         super().__init__(
             name=name,
             installer=NpmGlobal(package or self.PACKAGE, version),
             binary=self.BINARY,
             requires=requires,
+            config=config,
+            home=home,
+            owner=owner,
         )
+
+    @staticmethod
+    def translate_providers(
+        providers: Mapping[str, object], model_ref: str
+    ) -> dict[str, object]:
+        """Render provider declarations as OpenCode's ``provider`` map.
+
+        Notes that cost real debugging time if got wrong:
+
+        * secrets use ``{env:VAR}``; ``${VAR}`` does *not* work for ``apiKey``;
+        * a model key must match the upstream ``GET /v1/models`` id;
+        * ``limit.context``/``limit.output`` are required for custom models or
+          OpenCode cannot compute remaining context, since it normally reads
+          those from a registry that knows nothing about your endpoint;
+        * the npm package differs by wire protocol — ``@ai-sdk/openai-compatible``
+          for ``/v1/chat/completions``, ``@ai-sdk/openai`` for ``/v1/responses``.
+        """
+        npm_for = {
+            "openai-compatible": "@ai-sdk/openai-compatible",
+            "openai-responses": "@ai-sdk/openai",
+            "anthropic": "@ai-sdk/anthropic",
+        }
+        block: dict[str, object] = {}
+        for name, provider in providers.items():
+            models: dict[str, object] = {}
+            for alias, upstream in provider.models.items():  # type: ignore[attr-defined]
+                entry: dict[str, object] = {"name": alias}
+                # OpenCode's schema requires both keys when `limit` is
+                # present, so a partial limit is invalid — but silently
+                # emitting none because context_window was omitted leaves
+                # context accounting broken with no hint why. Fall back to the
+                # output cap for context so the pair is always complete.
+                context = provider.context_window or provider.max_output_tokens  # type: ignore[attr-defined]
+                output = provider.max_output_tokens  # type: ignore[attr-defined]
+                if context and output:
+                    entry["limit"] = {"context": context, "output": output}
+                models[upstream] = entry
+            block[name] = {
+                "npm": npm_for[provider.kind],  # type: ignore[attr-defined]
+                "name": name,
+                "options": {
+                    "baseURL": provider.base_url,  # type: ignore[attr-defined]
+                    "apiKey": "{env:" + provider.env_var + "}",  # type: ignore[attr-defined]
+                },
+                "models": models,
+            }
+        provider_name, alias = model_ref.split("/", 1)
+        upstream = providers[provider_name].models[alias]  # type: ignore[attr-defined]
+        return {
+            "$schema": "https://opencode.ai/config.json",
+            "provider": block,
+            "model": f"{provider_name}/{upstream}",
+        }
+
+
+class Droid(Harness):
+    """Factory's droid CLI.
+
+    Ships as an npm package with a platform-detecting install script as the
+    alternative; npm is used here for the same reason as OpenCode — it pins
+    cleanly and needs no network fetch of an unversioned shell script.
+
+    Auto-update is switched off. A harness that updates itself inside a running
+    container silently invalidates the promise its image digest makes: two
+    containers from the same digest would run different software. Pinning the
+    version in the image and disabling self-update is the only way the digest
+    stays meaningful.
+
+    Non-interactive use is ``droid exec``, which accepts a prompt on stdin.
+    Credentials come from ``FACTORY_API_KEY`` at run time and are never baked.
+
+    **Airgap defaults on here**, unlike droid's own default. This runtime
+    exists to run agents in containers against your own provider endpoints,
+    where the Factory cloud call is pure failure surface: without airgap you
+    get a bare "Exec failed" and have to read a log file to discover it was a
+    401 from a service you were not trying to use. Set ``airgap: false`` to
+    restore cloud sync for a Factory account.
+
+    **Airgap and BYOK.** droid can talk to an arbitrary OpenAI- or
+    Anthropic-compatible endpoint via ``customModels`` in
+    ``~/.factory/settings.json``, which avoids paying Factory for inference.
+    That alone is not enough to run without a Factory account: ``droid exec``
+    still opens a cloud session first and dies with
+    ``401 Missing authorization token`` before it ever contacts the custom
+    endpoint. ``FACTORY_AIRGAP_ENABLED=true`` skips that call — verified by
+    running ``droid exec`` against a local stub with no credentials at all and
+    watching the request arrive.
+
+    Two further quirks worth knowing, both verified:
+
+    * ``droid exec --model custom:<id>`` is rejected ("Invalid model"); the
+      custom model must be named in ``sessionDefaultSettings.model`` instead.
+      See Factory-AI/factory#787.
+    * The endpoint is called as a streaming ``POST /v1/chat/completions`` with
+      the tool list attached, so a BYOK proxy must speak SSE, not just
+      request/response.
+    """
+
+    PACKAGE = "droid"
+    BINARY = "droid"
+    DEFAULT_VERSION = "0.176.0"
+
+    STATE_DIR = "~/.factory"
+    """Sessions, logs and caches land here, so HOME must be correct."""
+
+    CONFIG_PATH = ".factory/settings.json"
+
+    def __init__(
+        self,
+        *,
+        version: str = DEFAULT_VERSION,
+        package: str | None = None,
+        name: str = "droid",
+        auto_update: bool = False,
+        airgap: bool = True,
+        requires: Sequence[str] = ("node",),
+        config: Mapping[str, object] | None = None,
+        home: str = "/home/agent",
+        owner: str = "agent",
+    ) -> None:
+        super().__init__(
+            name=name,
+            installer=NpmGlobal(package or self.PACKAGE, version),
+            binary=self.BINARY,
+            requires=requires,
+            config=config,
+            home=home,
+            owner=owner,
+        )
+        self.auto_update = bool(auto_update)
+        self.airgap = bool(airgap)
+
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+        body = list(super().instructions(context))
+        env: dict[str, str] = {}
+        if not self.auto_update:
+            env["FACTORY_DROID_AUTO_UPDATE_ENABLED"] = "false"
+        if self.airgap:
+            env["FACTORY_AIRGAP_ENABLED"] = "true"
+        if env:
+            body.append(Env(env))
+        return body
+
+    def identity(self) -> Mapping[str, object]:
+        return {
+            **super().identity(),
+            "auto_update": self.auto_update,
+            "airgap": self.airgap,
+        }
+
+    @staticmethod
+    def translate_providers(
+        providers: Mapping[str, object], model_ref: str
+    ) -> dict[str, object]:
+        """Render provider declarations as droid's ``customModels``.
+
+        droid names a custom model ``custom:<displayName>-<index>``, derived
+        from its position in the array, and *rejects* that name on ``--model``
+        (Factory-AI/factory#787) — so the selection has to go through
+        ``sessionDefaultSettings.model``. Secrets use ``${VAR}``.
+        """
+        provider_for = {
+            "openai-compatible": "generic-chat-completion-api",
+            "openai-responses": "openai",
+            "anthropic": "anthropic",
+        }
+        custom: list[dict[str, object]] = []
+        index_of: dict[str, int] = {}
+        for name, provider in providers.items():
+            for alias, upstream in provider.models.items():  # type: ignore[attr-defined]
+                display = f"{name}-{alias}".replace("/", "-")
+                index_of[f"{name}/{alias}"] = len(custom)
+                entry: dict[str, object] = {
+                    "model": upstream,
+                    "displayName": display,
+                    "baseUrl": provider.base_url,  # type: ignore[attr-defined]
+                    "apiKey": "${" + provider.env_var + "}",  # type: ignore[attr-defined]
+                    "provider": provider_for[provider.kind],  # type: ignore[attr-defined]
+                }
+                if provider.max_output_tokens:  # type: ignore[attr-defined]
+                    entry["maxOutputTokens"] = provider.max_output_tokens  # type: ignore[attr-defined]
+                custom.append(entry)
+        selected = index_of[model_ref]
+        display = custom[selected]["displayName"]
+        return {
+            "customModels": custom,
+            "sessionDefaultSettings": {"model": f"custom:{display}-{selected}"},
+        }
 
 
 class Langfuse:
@@ -408,54 +651,106 @@ class Script:
         return {"filename": self.filename, "shell": self.shell, "content": self.content}
 
 
-class Workspace:
-    """Create the working directory and the unprivileged user agents run as.
+class UserAccount:
+    """Create the unprivileged user agents run as, and its home directory.
 
-    Runs last so it owns the final USER and WORKDIR regardless of what earlier
-    modules set. Teich works around a fixed container uid by chmod-ing whole
-    trees to 0777 and writing credential files 0666; the fix is to run as the
-    caller's uid instead, which the builder wires up at run time.
+    Deliberately at ``Stage.SYSTEM`` rather than with the workdir. Harness
+    modules run at ``Stage.HARNESS`` and may need to write config into ``$HOME``
+    (droid reads ``~/.factory/settings.json``, opencode
+    ``~/.config/opencode/opencode.json``). If the home directory were created at
+    ``Stage.USER`` — after the harnesses — those writes would have nowhere to
+    land. Creating the account early removes the ordering hazard instead of
+    working around it.
+
+    ``ENV HOME`` is set here for the same reason it must be explicit at all:
+    Docker derives HOME from /etc/passwd by mapping the uid to the *first*
+    matching name, and ``--non-unique`` means two names can share one uid.
+    """
+
+    stage = Stage.SYSTEM
+    requires: tuple[str, ...] = ()
+
+    def __init__(
+        self,
+        *,
+        user: str = "agent",
+        uid: int = 1000,
+        # /bin/sh, not /bin/bash: alpine has no bash, and a module that only
+        # works on Debian derivatives is not a general one.
+        shell: str = "/bin/sh",
+        home: str | None = None,
+        name: str = "user",
+    ) -> None:
+        self.name = name
+        self.user = _safe_token(user, what="user name")
+        self.shell = _safe_token(shell, what="user shell")
+        self.uid = _safe_uid(uid)
+        self.home = _safe_token(home or f"/home/{self.user}", what="home directory")
+
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+        return [
+            Comment(f"user {self.user} (uid {self.uid}, HOME={self.home})"),
+            # useradd is shadow-utils and absent on alpine, which provides
+            # busybox adduser instead — different flags, and no support for a
+            # duplicate uid. Try each in turn, then fall back to letting the
+            # system pick a uid, so this works on both families.
+            Run(
+                [
+                    f"if ! id -u {self.user} >/dev/null 2>&1; then "
+                    f"useradd --create-home --non-unique --uid {self.uid} "
+                    f"--shell {self.shell} {self.user} 2>/dev/null "
+                    f"|| adduser -D -u {self.uid} -h {self.home} "
+                    f"-s {self.shell} {self.user} 2>/dev/null "
+                    f"|| adduser -D -h {self.home} -s {self.shell} {self.user}; fi",
+                    f"mkdir -p {self.home}",
+                    f"chown -R {self.user} {self.home}",
+                ]
+            ),
+            Env({"HOME": self.home}),
+        ]
+
+    def identity(self) -> Mapping[str, object]:
+        return {
+            "user": self.user,
+            "uid": self.uid,
+            "home": self.home,
+            "shell": self.shell,
+        }
+
+
+class Workdir:
+    """Create the working directory and drop to the unprivileged user.
+
+    Runs last so it owns the final ``WORKDIR`` and ``USER`` regardless of what
+    earlier modules set. Requires :class:`UserAccount`, which created the user
+    and its home back at ``Stage.SYSTEM``.
     """
 
     stage = Stage.USER
-    requires: tuple[str, ...] = ()
 
     def __init__(
         self,
         *,
         path: str = "/workspace",
         user: str = "agent",
-        uid: int = 1000,
-        name: str = "workspace",
+        name: str = "workdir",
+        requires: Sequence[str] = ("user",),
     ) -> None:
         self.name = name
-        self.path = _safe_token(path, what="workspace path")
-        self.user = _safe_token(user, what="workspace user")
-        self.uid = _safe_uid(uid)
+        self.path = _safe_token(path, what="workdir path")
+        self.user = _safe_token(user, what="workdir user")
+        self.requires = tuple(requires)
 
     def instructions(self, context: BuildContext) -> Sequence[Instruction]:
         return [
-            Comment(f"workspace {self.path} owned by {self.user}"),
-            # Node base images already ship a uid-1000 'node' user, so a plain
-            # `useradd --uid 1000` fails there. `|| true` would swallow that and
-            # leave a Dockerfile whose USER instruction then fails. Create the
-            # user only if absent, and allow a shared uid so the container uid
-            # can still match the host's.
-            Run(
-                [
-                    f"if ! id -u {self.user} >/dev/null 2>&1; then "
-                    f"useradd --create-home --non-unique --uid {self.uid} "
-                    f"--shell /bin/bash {self.user}; fi",
-                    f"mkdir -p {self.path}",
-                    f"chown -R {self.uid} {self.path}",
-                ]
-            ),
-            Workdir(self.path),
+            Comment(f"workdir {self.path} owned by {self.user}"),
+            Run([f"mkdir -p {self.path}", f"chown -R {self.user} {self.path}"]),
+            Workdir_(self.path),
             User(self.user),
         ]
 
     def identity(self) -> Mapping[str, object]:
-        return {"path": self.path, "user": self.user, "uid": self.uid}
+        return {"path": self.path, "user": self.user}
 
 
 def register_builtins(registry=REGISTRY) -> None:
@@ -464,10 +759,12 @@ def register_builtins(registry=REGISTRY) -> None:
         "apt": AptPackages,
         "node": NodeToolchain,
         "python": PythonToolchain,
+        "droid": Droid,
         "opencode": OpenCode,
         "langfuse": Langfuse,
         "script": Script,
-        "workspace": Workspace,
+        "user": UserAccount,
+        "workdir": Workdir,
     }
     for name, factory in factories.items():
         registry.register(name, factory, replace=True)

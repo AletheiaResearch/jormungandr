@@ -5,9 +5,7 @@ Compose Docker images and run containers for agent harnesses.
 This is the runtime layer: it builds images that can run agent CLIs and manages
 the containers they run in. It does not read, parse, or convert traces.
 
-**Status: internals only.** There is no CLI surface yet, and no logic for
-actually *running* a harness — only the mechanism for building the image and
-managing containers. OpenCode is the first supported harness; others follow.
+Supported harnesses: **OpenCode** and **droid**.
 
 ## Install
 
@@ -20,30 +18,87 @@ see [Why the docker CLI](#why-the-docker-cli).
 
 ## Usage
 
-```python
-from pathlib import Path
+Describe a run in `jorm.yaml`:
 
-from jormungandr.runtime.build import ImageBuilder
-from jormungandr.runtime.spec import ImageSpec
-import jormungandr.runtime.modules.builtin  # registers the built-in modules
-
-spec = ImageSpec(
-    base_image="node:22-bookworm-slim",
-    repository="my-harness",
-    modules=[
-        {"name": "apt", "packages": ["git", "curl", "ca-certificates"]},
-        {"name": "node", "preinstalled": True},   # base image already has it
-        {"name": "opencode"},
-        {"name": "workspace"},
-    ],
-)
-
-result = ImageBuilder().build(spec)
-for layer in result.layers:
-    print(layer.tier, "cached" if layer.cached else "built", layer.reference)
-# base     built  my-harness:base-9b643a15e3ad0303
-# runtime  built  my-harness:runtime-f725284cd47b8563
+```yaml
+version: 1
+providers:
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    api_key: ${OPENROUTER_API_KEY}     # a reference; never a literal
+    models:
+      deepseek: deepseek/deepseek-v4-flash
+harness:
+  name: droid                          # or opencode
+  model: openrouter/deepseek
+prompts:
+  file: ./prompts.jsonl
+run:
+  concurrency: 4
+  env_files: [./secrets.env]
 ```
+
+Prompts use [Teich's format](#prompt-records), so an existing file works as is:
+
+```jsonl
+{"prompt": "Draft a plan"}
+{"prompt": "Build a page", "follow_up_prompts": ["Make it responsive"]}
+{"prompt": "Add tests", "system": "Be terse.", "github_repo": "acme/app"}
+```
+
+Then:
+
+```sh
+jormungandr check      # validate config, prompts and credentials — builds nothing
+jormungandr render     # print the generated Dockerfiles
+jormungandr build      # build the image
+jormungandr run        # build, then run every record
+```
+
+```
+$ jormungandr run
+image     my-harness:runtime-cf174c9185 (cached)
+3 record(s), concurrency 2
+[1/3] alpha                    ok    1 turn(s)  4.2s
+[2/3] beta                     ok    2 turn(s)  11.7s
+[3/3] gamma                    FAIL  turn 0 exited 5
+
+3 record(s): 2 ok, 1 failed  ->  ./runs
+```
+
+`run` exits non-zero if any record failed, so CI notices without parsing output.
+Each record gets a directory holding its workspace, raw per-turn output, a
+`result.json`, and the harness's own session record.
+
+A record that names a repository gets a third image tier — the checkout is
+cloned **by the daemon**, into an image built on the runtime one:
+
+```
+base       OS + toolchains          rarely changes
+runtime    harness + integrations   changes on a version bump
+workspace  the repository at a commit
+```
+
+That tier is content-addressed by the resolved commit, so a retried run reuses
+the checkout instead of cloning again, and two records on the same commit share
+one image. Refs are resolved to a concrete revision with `git ls-remote` before
+building, because a digest can only be honest about fixed content — caching a
+branch name would serve yesterday's code from today's tag.
+
+Cloning inside the image also removes the last thing reaching out of the
+container. Public repositories only; no credentials are read or forwarded.
+
+There is no host-side workspace: a record's working directory always comes
+from an image. The working directory is copied back out after the run, so what
+the agent changed is on disk to inspect. `run.mounts` remains as an explicit,
+opt-in escape hatch for anything else.
+
+Housekeeping: `jormungandr prune` removes images this tool built, and
+`jormungandr reap` removes containers left by crashed runs — by default only those whose owning process is gone, so a
+concurrent run is left alone.
+
+Everything is also a library call: `load_config`, `compile_image_spec`,
+`execute`.
 
 ## How it works
 
@@ -188,8 +243,15 @@ changes and a rebuild happens. Change nothing and the build is skipped. There is
 no mtime check and no force-rebuild flag to remember.
 
 Every image is stamped with OCI labels (`dev.jormungandr.*`). Discovery and
-pruning filter on those labels, never on name prefixes, so `prune` can never
-touch an unrelated image of yours.
+pruning filter on those labels rather than on name prefixes.
+
+The label alone is not sufficient, though: Docker propagates a parent image's
+labels into any child, so an image you build `FROM` one of ours inherits
+`dev.jormungandr.managed=true`. `prune` therefore also requires the image's
+digest label to match the digest embedded in its own tag — which a derived
+image cannot satisfy, because it inherits its *parent's* digest. Containers get
+the same treatment through a session label written at creation time, which an
+image cannot supply.
 
 ### Containers
 
