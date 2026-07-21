@@ -1,40 +1,54 @@
-"""Prompt records and their JSONL file.
+"""Prompt records, in Teich's ``prompts.jsonl`` format.
 
-The one design decision the benchmark formats got unambiguously right is that
-input records and output traces are distinct things joined by an id. The one
-they got wrong is deriving that id from the prompt text: Teich hashes the
-prompt, so two identical prompts collide and editing a prompt silently creates
-a new task instead of showing a diff on an existing one.
+The record schema is Teich's, so an existing prompt file loads unchanged::
 
-So ``id`` is required and caller-supplied, and everything benchmark-specific
-lives in ``metadata`` rather than in the schema every record must satisfy.
+    {"prompt": "Draft a plan"}
+    {"prompt": "Build a page", "follow_up_prompts": ["Make it responsive"]}
+    {"prompt": "Fix the bug", "system": "Be terse.", "github_repo": "acme/app"}
+
+Fields: ``prompt`` (required), ``follow_up_prompts``, ``system``,
+``github_repo``, ``image`` — matching ``teich/src/teich/config.py:244``.
+
+Two additions, both optional, neither required by a Teich file:
+
+* ``id`` — Teich identifies a run by hashing the prompt text, so two identical
+  prompts collide and editing a prompt silently creates a new run rather than
+  showing a diff on the existing one. Output directories need a name, so an id
+  is derived from the record's *position* when absent: stable for a given file,
+  and never colliding. Supply one explicitly if you expect to reorder the file.
+* ``overrides`` — per-record ``timeout``/``max_turns``. Not ``model``: model
+  selection is baked into the image, so varying it per record would mean an
+  image per record.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Sequence
+import re
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-__all__ = ["PromptRecord", "Turn", "Workspace", "load_prompts"]
+__all__ = ["Overrides", "PromptRecord", "Turn", "Workspace", "load_prompts"]
+
+GITHUB_REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
 class Turn(BaseModel):
+    """The normalized internal form. Not part of the file format."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    role: Literal["system", "user", "assistant"] = "user"
+    role: Literal["system", "user"] = "user"
     content: str = Field(min_length=1)
 
 
 class Workspace(BaseModel):
-    """What the agent should find in its working directory.
+    """What the agent finds in its working directory.
 
-    A tagged union rather than an overloaded string: it covers a local
-    directory, a git checkout, and nothing, without inheriting Teich's
-    ``github_repo`` assumption or SWE-bench's ``repo`` + ``base_commit``.
+    Derived from ``github_repo``; also constructible directly for a local
+    directory, which Teich's format has no way to express.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -43,6 +57,9 @@ class Workspace(BaseModel):
     path: str | None = None
     repo: str | None = None
     ref: str | None = None
+    """Unset means the repository's default branch, as Teich does. That makes
+    the run unreproducible — the same record clones different code tomorrow —
+    so pin it when the result matters."""
 
     @model_validator(mode="after")
     def _check_fields_match_type(self) -> Workspace:
@@ -50,22 +67,16 @@ class Workspace(BaseModel):
             raise ValueError("workspace type 'local' requires 'path'")
         if self.type == "git" and not self.repo:
             raise ValueError("workspace type 'git' requires 'repo'")
-        if self.type == "git" and not self.ref:
-            raise ValueError(
-                "workspace type 'git' requires 'ref' — a branch name would make "
-                "the run irreproducible; pin a tag or commit"
-            )
         return self
 
 
 class Overrides(BaseModel):
     """Per-record overrides. Run config is the base; these win per key.
 
-    Deliberately no per-record ``model``. Model selection is baked into the
-    image — droid resolves it from ``sessionDefaultSettings`` in a file that is
-    part of the image digest — so varying the model per record would mean a
-    separate image per record. Only knobs that cost nothing at run time live
-    here; to compare models, run the config twice.
+    Deliberately no ``model``. Model selection is baked into the image — droid
+    resolves it from ``sessionDefaultSettings`` in a file that is part of the
+    image digest — so varying it per record would mean a separate image per
+    record. To compare models, run the config twice.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -77,60 +88,109 @@ class Overrides(BaseModel):
 class PromptRecord(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    id: str = Field(min_length=1)
-    schema_version: str = "1"
-
-    prompt: str | None = None
+    # --- Teich's format -----------------------------------------------------
+    prompt: str = Field(min_length=1)
     follow_up_prompts: tuple[str, ...] = ()
-    turns: tuple[Turn, ...] = ()
+    system: str | None = None
+    github_repo: str | None = None
+    image: str | None = None
 
-    workspace: Workspace = Field(default_factory=Workspace)
+    # --- additive, optional -------------------------------------------------
+    id: str | None = None
+    workspace: Workspace | None = None
     overrides: Overrides = Field(default_factory=Overrides)
     tags: tuple[str, ...] = ()
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    @model_validator(mode="after")
-    def _normalize_turns(self) -> PromptRecord:
-        """Accept Teich's spelling, store the canonical one.
+    @field_validator("prompt", "system", mode="before")
+    @classmethod
+    def _normalize_text(cls, value: object) -> object:
+        """Match Teich's normalization: CRLF to LF, strip, literal 'none'."""
+        if value is None:
+            return None
+        text = value if isinstance(value, str) else str(value)
+        text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not text or text.lower() == "none":
+            return None
+        return text
 
-        ``prompt`` + ``follow_up_prompts`` is sugar; ``turns`` is canonical
-        because a role list can carry a leading system message or an assistant
-        prefill, which a list of bare strings cannot.
+    @field_validator("follow_up_prompts", mode="before")
+    @classmethod
+    def _normalize_follow_ups(cls, value: object) -> object:
+        if value is None:
+            return ()
+        if isinstance(value, str) or not isinstance(value, (list, tuple)):
+            raise ValueError("follow_up_prompts must be a list of strings")
+        cleaned: list[str] = []
+        for index, item in enumerate(value, start=1):
+            text = str(item).replace("\r\n", "\n").replace("\r", "\n").strip()
+            if not text:
+                raise ValueError(f"follow_up_prompts entry {index} cannot be empty")
+            cleaned.append(text)
+        return tuple(cleaned)
+
+    @field_validator("github_repo")
+    @classmethod
+    def _validate_github_repo(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not GITHUB_REPO.fullmatch(value.strip()):
+            raise ValueError(f"github_repo must be in owner/repo form, got {value!r}")
+        return value.strip()
+
+    @field_validator("image")
+    @classmethod
+    def _reject_per_record_image(cls, value: str | None) -> str | None:
+        """Teich models this field and then refuses it at use time.
+
+        Rejecting it here names the offending record instead of failing after
+        the banner has printed and directories have been created. An image per
+        record would also mean one run spanning several environments; if two
+        records need different images, that is two runs.
         """
-        if self.turns and (self.prompt or self.follow_up_prompts):
-            raise ValueError(
-                "give either 'turns' or 'prompt'/'follow_up_prompts', not both"
+        if value is None:
+            return None
+        raise ValueError(
+            "per-record 'image' is not supported: one run builds one image. "
+            "Use a separate config for a different image."
+        )
+
+    @model_validator(mode="after")
+    def _derive_workspace(self) -> PromptRecord:
+        if self.workspace is None:
+            derived = (
+                Workspace(type="git", repo=f"https://github.com/{self.github_repo}")
+                if self.github_repo
+                else Workspace()
             )
-        if self.turns:
-            if not any(turn.role == "user" for turn in self.turns):
-                raise ValueError("'turns' must contain at least one user turn")
-            return self
-        if not self.prompt:
-            raise ValueError("a record needs 'prompt' or 'turns'")
-        turns = [Turn(role="user", content=self.prompt)]
-        turns += [Turn(role="user", content=f) for f in self.follow_up_prompts]
-        object.__setattr__(self, "turns", tuple(turns))
+            object.__setattr__(self, "workspace", derived)
         return self
 
     @property
-    def user_turns(self) -> tuple[str, ...]:
-        """The user turns, in order — what the runner actually sends."""
-        return tuple(t.content for t in self.turns if t.role == "user")
+    def turns(self) -> tuple[Turn, ...]:
+        """The normalized turn list: the system turn, then each user turn."""
+        turns: list[Turn] = []
+        if self.system:
+            turns.append(Turn(role="system", content=self.system))
+        turns.append(Turn(role="user", content=self.prompt))
+        turns += [Turn(role="user", content=f) for f in self.follow_up_prompts]
+        return tuple(turns)
 
     @property
-    def system(self) -> str | None:
-        for turn in self.turns:
-            if turn.role == "system":
-                return turn.content
-        return None
+    def user_turns(self) -> tuple[str, ...]:
+        """What the runner actually sends, in order."""
+        return (self.prompt, *self.follow_up_prompts)
+
+    def with_id(self, derived: str) -> PromptRecord:
+        return self if self.id else self.model_copy(update={"id": derived})
 
 
 def load_prompts(path: Path) -> tuple[PromptRecord, ...]:
-    """Read a JSONL prompt file.
+    """Read a Teich-format ``prompts.jsonl``.
 
-    Errors are reported as ``line N: …`` because a hand-authored data file
-    with a bad line is the common case, and "validation error" without a line
-    number is not actionable.
+    Errors are reported as ``line N: …`` — a hand-authored data file with a bad
+    line is the common case, and a validation error without a line number is
+    not actionable.
     """
     records: list[PromptRecord] = []
     seen: set[str] = set()
@@ -144,18 +204,25 @@ def load_prompts(path: Path) -> tuple[PromptRecord, ...]:
                 payload = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{path}: line {number}: invalid JSON: {exc}") from exc
+            # A bare string is a prompt, matching Teich's plain-text loader.
+            if isinstance(payload, str):
+                payload = {"prompt": payload}
             if not isinstance(payload, dict):
-                raise ValueError(f"{path}: line {number}: expected a JSON object")
+                raise ValueError(
+                    f"{path}: line {number}: expected a JSON object or a bare string"
+                )
             try:
                 record = PromptRecord.model_validate(payload)
             except Exception as exc:
                 raise ValueError(f"{path}: line {number}: {exc}") from exc
+
+            record = record.with_id(f"prompt-{len(records):04d}")
             if record.id in seen:
                 raise ValueError(
                     f"{path}: line {number}: duplicate id {record.id!r}. "
                     "Ids name output directories, so they must be unique."
                 )
-            seen.add(record.id)
+            seen.add(str(record.id))
             records.append(record)
     if not records:
         raise ValueError(f"{path}: no prompt records found")

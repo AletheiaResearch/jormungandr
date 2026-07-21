@@ -24,6 +24,7 @@ from pathlib import Path
 
 from jormungandr.config.models import JormConfig
 from jormungandr.config.prompts import PromptRecord
+from jormungandr.runtime.invocation import invocation_for
 from jormungandr.runtime.run import HarnessRun, PromptRunner
 from jormungandr.runtime.spec import ContainerSpec, ResourceLimits
 
@@ -68,6 +69,20 @@ class ExecutionReport:
         return not self.failed
 
 
+def _write_agents_md(workspace: Path, system: str) -> None:
+    """Deliver a system prompt through AGENTS.md.
+
+    For harnesses with no system-prompt flag — opencode's ``run`` exposes none.
+    Appended rather than overwritten: a cloned repository may ship its own
+    AGENTS.md, and silently discarding the project's instructions to inject
+    ours would change the agent's behaviour in a way nobody asked for.
+    """
+    target = workspace / "AGENTS.md"
+    existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    separator = "\n\n" if existing and not existing.endswith("\n\n") else ""
+    target.write_text(existing + separator + system.rstrip() + "\n", encoding="utf-8")
+
+
 def _prepare_workspace(record: PromptRecord, directory: Path) -> Path | None:
     """Materialize the record's workspace under its output directory.
 
@@ -77,6 +92,7 @@ def _prepare_workspace(record: PromptRecord, directory: Path) -> Path | None:
     inspect.
     """
     spec = record.workspace
+    assert spec is not None  # set by the model validator
     if spec.type == "none":
         return None
 
@@ -100,17 +116,27 @@ def _prepare_workspace(record: PromptRecord, directory: Path) -> Path | None:
             text=True,
             timeout=600,
         )
-        subprocess.run(
-            ["git", "-C", str(target), "checkout", "--quiet", str(spec.ref)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        if spec.ref:
+            subprocess.run(
+                ["git", "-C", str(target), "checkout", "--quiet", str(spec.ref)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        else:
+            # Teich's github_repo has no ref, so this is the compatible
+            # behaviour — but the same record clones different code tomorrow.
+            log.warning(
+                "%s: cloning %s at its default branch; the run is not "
+                "reproducible. Pin a ref via workspace.ref.",
+                record.id,
+                spec.repo,
+            )
     except subprocess.CalledProcessError as exc:
         raise ExecutionError(
             f"{record.id}: could not prepare git workspace "
-            f"{spec.repo}@{spec.ref}: {exc.stderr.strip()}"
+            f"{spec.repo}@{spec.ref or 'default branch'}: {exc.stderr.strip()}"
         ) from exc
     return target
 
@@ -193,11 +219,26 @@ def _run_one(
 
     timeout = record.overrides.timeout or config.run.timeout
 
+    # System prompt delivery is per-harness: droid takes a flag, opencode has
+    # none and reads AGENTS.md from the working directory.
+    system = record.system
+    invocation = invocation_for(config.harness.name)
+    system_argv: str | None = None
+    if system:
+        if getattr(invocation, "system_via", "argv") == "agents_md":
+            if workspace is None:
+                workspace = directory / "workspace"
+                workspace.mkdir(parents=True, exist_ok=True)
+            _write_agents_md(workspace, system)
+        else:
+            system_argv = system
+
     try:
         run = runner.run(
             harness=config.harness.name,
             image=image,
             prompts=prompts,
+            system=system_argv,
             timeout=timeout,
             container_spec=_container_spec(config, image, workspace),
             collect_state_to=directory / "state" if config.output.collect_state else None,

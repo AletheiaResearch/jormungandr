@@ -57,7 +57,18 @@ class HarnessInvocation(Protocol):
     here — this only says where to look.
     """
 
-    def build(self, prompt: str, *, model: str | None = None) -> Invocation:
+    system_via: str
+    """How this harness accepts a per-record system prompt.
+
+    ``"argv"``  — a command-line flag.
+    ``"agents_md"`` — an ``AGENTS.md`` in the working directory, for harnesses
+    with no flag. opencode has none: its ``run`` subcommand exposes no
+    system-prompt option at all, so the file convention is the only route.
+    """
+
+    def build(
+        self, prompt: str, *, model: str | None = None, system: str | None = None
+    ) -> Invocation:
         """Return the command that runs ``prompt`` to completion."""
         ...
 
@@ -72,8 +83,13 @@ class OpenCodeInvocation:
 
     harness = "opencode"
     state_paths = (".local/share/opencode",)
+    # `opencode run --help` lists no system-prompt flag, so AGENTS.md in the
+    # working directory is the only route.
+    system_via = "agents_md"
 
-    def build(self, prompt: str, *, model: str | None = None) -> Invocation:
+    def build(
+        self, prompt: str, *, model: str | None = None, system: str | None = None
+    ) -> Invocation:
         argv: list[str] = ["opencode", "run"]
         if model:
             argv += ["--model", model]
@@ -94,6 +110,7 @@ class DroidInvocation:
 
     harness = "droid"
     state_paths = (".factory/sessions", ".factory/logs")
+    system_via = "argv"
 
     def __init__(self, *, autonomy: str = "low", output_format: str = "json") -> None:
         if autonomy not in {"low", "medium", "high"}:
@@ -103,11 +120,15 @@ class DroidInvocation:
         self.autonomy = autonomy
         self.output_format = output_format
 
-    def build(self, prompt: str, *, model: str | None = None) -> Invocation:
+    def build(
+        self, prompt: str, *, model: str | None = None, system: str | None = None
+    ) -> Invocation:
         argv: list[str] = ["droid", "exec", "--auto", self.autonomy]
         argv += ["--output-format", self.output_format]
         if model:
             argv += ["--model", model]
+        if system:
+            argv += ["--append-system-prompt", system]
         return Invocation(argv=tuple(argv), stdin=prompt)
 
 

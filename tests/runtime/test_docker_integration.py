@@ -482,6 +482,7 @@ class TestExecuteEndToEnd:
             "output": {"dir": "./runs"},
         }
         (tmp_path / "jorm.yaml").write_text(json.dumps(config))  # JSON is valid YAML
+        # Teich format, with explicit ids so the assertions can name them.
         (tmp_path / "prompts.jsonl").write_text(
             '{"id":"alpha","prompt":"first"}\n'
             '{"id":"beta","prompt":"one","follow_up_prompts":["two"]}\n'

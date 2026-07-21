@@ -159,56 +159,81 @@ class TestJormConfig:
 
 
 class TestPromptRecords:
-    def test_id_is_required(self) -> None:
-        with pytest.raises(ValidationError):
-            PromptRecord(prompt="x")
+    """Teich's prompts.jsonl format — an existing file must load unchanged."""
 
-    def test_prompt_becomes_a_user_turn(self) -> None:
-        record = PromptRecord(id="a", prompt="hello")
-        assert record.user_turns == ("hello",)
-
-    def test_follow_ups_are_normalized_into_turns(self) -> None:
-        record = PromptRecord(id="a", prompt="one", follow_up_prompts=["two", "three"])
-        assert record.user_turns == ("one", "two", "three")
-
-    def test_explicit_turns_support_a_system_message(self) -> None:
+    def test_a_teich_record_loads(self) -> None:
         record = PromptRecord(
-            id="a",
-            turns=[{"role": "system", "content": "be terse"}, {"role": "user", "content": "go"}],
+            prompt="Do the thing",
+            follow_up_prompts=["And this"],
+            system="Be terse.",
+            github_repo="acme/app",
         )
-        assert record.system == "be terse"
-        assert record.user_turns == ("go",)
+        assert record.user_turns == ("Do the thing", "And this")
+        assert record.system == "Be terse."
 
-    def test_both_spellings_at_once_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="not both"):
-            PromptRecord(id="a", prompt="x", turns=[{"role": "user", "content": "y"}])
+    def test_prompt_is_required(self) -> None:
+        with pytest.raises(ValidationError):
+            PromptRecord(follow_up_prompts=["x"])
 
-    def test_turns_need_a_user_turn(self) -> None:
-        with pytest.raises(ValidationError, match="at least one user turn"):
-            PromptRecord(id="a", turns=[{"role": "system", "content": "only system"}])
+    def test_id_is_optional(self) -> None:
+        # Teich files have no id; one is derived positionally at load.
+        assert PromptRecord(prompt="x").id is None
 
-    def test_empty_record_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="needs 'prompt' or 'turns'"):
-            PromptRecord(id="a")
+    def test_crlf_is_normalized(self) -> None:
+        assert PromptRecord(prompt="a\r\nb").prompt == "a\nb"
+
+    def test_literal_none_system_becomes_none(self) -> None:
+        # Teich treats the string "none" as unset.
+        assert PromptRecord(prompt="x", system="none").system is None
+
+    def test_empty_follow_up_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="cannot be empty"):
+            PromptRecord(prompt="x", follow_up_prompts=["ok", "  "])
+
+    def test_follow_ups_must_be_a_list(self) -> None:
+        with pytest.raises(ValidationError, match="must be a list"):
+            PromptRecord(prompt="x", follow_up_prompts="not a list")
+
+    def test_system_becomes_the_first_turn(self) -> None:
+        turns = PromptRecord(prompt="go", system="be terse").turns
+        assert turns[0].role == "system" and turns[0].content == "be terse"
+        assert turns[1].role == "user"
+
+    def test_github_repo_becomes_a_git_workspace(self) -> None:
+        record = PromptRecord(prompt="x", github_repo="acme/app")
+        assert record.workspace.type == "git"
+        assert record.workspace.repo == "https://github.com/acme/app"
+        # Teich has no ref, so the default branch is used.
+        assert record.workspace.ref is None
+
+    def test_malformed_github_repo_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="owner/repo"):
+            PromptRecord(prompt="x", github_repo="not-a-repo")
+
+    def test_no_github_repo_means_no_workspace(self) -> None:
+        assert PromptRecord(prompt="x").workspace.type == "none"
+
+    def test_per_record_image_is_rejected_at_parse_time(self) -> None:
+        # Teich models this field and then refuses it at use time, after the
+        # banner has printed and directories exist.
+        with pytest.raises(ValidationError, match="one run builds one image"):
+            PromptRecord(prompt="x", image="other:tag")
 
     def test_unknown_key_rejected(self) -> None:
-        # Silent drops are the worst failure mode for a hand-authored format.
         with pytest.raises(ValidationError):
-            PromptRecord(id="a", prompt="x", promt="typo")
+            PromptRecord(prompt="x", promt="typo")
 
-    def test_git_workspace_requires_a_pinned_ref(self) -> None:
-        with pytest.raises(ValidationError, match="irreproducible"):
-            PromptRecord(
-                id="a", prompt="x", workspace={"type": "git", "repo": "https://h/r"}
-            )
-
-    def test_local_workspace_requires_a_path(self) -> None:
-        with pytest.raises(ValidationError, match="requires 'path'"):
-            PromptRecord(id="a", prompt="x", workspace={"type": "local"})
+    def test_local_workspace_is_expressible(self) -> None:
+        # Not in Teich's format, but a useful superset.
+        record = PromptRecord(prompt="x", workspace={"type": "local", "path": "/src"})
+        assert record.workspace.type == "local"
 
     def test_overrides_are_namespaced(self) -> None:
-        record = PromptRecord(id="a", prompt="x", overrides={"timeout": 60})
-        assert record.overrides.timeout == 60
+        assert PromptRecord(prompt="x", overrides={"timeout": 60}).overrides.timeout == 60
+
+    def test_no_per_record_model_override(self) -> None:
+        with pytest.raises(ValidationError):
+            PromptRecord(prompt="x", overrides={"model": "a/b"})
 
 
 class TestLoadPrompts:
@@ -217,21 +242,41 @@ class TestLoadPrompts:
         path.write_text(body)
         return path
 
-    def test_reads_records(self, tmp_path: Path) -> None:
-        path = self.write(tmp_path, '{"id":"a","prompt":"x"}\n{"id":"b","prompt":"y"}\n')
-        assert [r.id for r in load_prompts(path)] == ["a", "b"]
+    def test_reads_a_teich_file(self, tmp_path: Path) -> None:
+        path = self.write(
+            tmp_path,
+            '{"prompt":"x"}\n'
+            '{"prompt":"y","follow_up_prompts":["z"]}\n',
+        )
+        records = load_prompts(path)
+        assert [r.prompt for r in records] == ["x", "y"]
+        assert records[1].user_turns == ("y", "z")
+
+    def test_ids_are_derived_positionally(self, tmp_path: Path) -> None:
+        # Not from the prompt text: Teich hashes it, so identical prompts
+        # collide and an edit silently creates a new run.
+        path = self.write(tmp_path, '{"prompt":"same"}\n{"prompt":"same"}\n')
+        assert [r.id for r in load_prompts(path)] == ["prompt-0000", "prompt-0001"]
+
+    def test_explicit_ids_are_honoured(self, tmp_path: Path) -> None:
+        path = self.write(tmp_path, '{"id":"mine","prompt":"x"}\n')
+        assert load_prompts(path)[0].id == "mine"
+
+    def test_a_bare_string_is_a_prompt(self, tmp_path: Path) -> None:
+        path = self.write(tmp_path, '"just a prompt"\n')
+        assert load_prompts(path)[0].prompt == "just a prompt"
 
     def test_blank_and_comment_lines_skipped(self, tmp_path: Path) -> None:
-        path = self.write(tmp_path, '\n# a note\n{"id":"a","prompt":"x"}\n\n')
+        path = self.write(tmp_path, '\n# a note\n{"prompt":"x"}\n\n')
         assert len(load_prompts(path)) == 1
 
     def test_bom_is_tolerated(self, tmp_path: Path) -> None:
         path = tmp_path / "p.jsonl"
-        path.write_bytes(b'\xef\xbb\xbf{"id":"a","prompt":"x"}\n')
-        assert load_prompts(path)[0].id == "a"
+        path.write_bytes(b'\xef\xbb\xbf{"prompt":"x"}\n')
+        assert load_prompts(path)[0].prompt == "x"
 
     def test_errors_report_the_line_number(self, tmp_path: Path) -> None:
-        path = self.write(tmp_path, '{"id":"a","prompt":"x"}\nnot json\n')
+        path = self.write(tmp_path, '{"prompt":"x"}\nnot json\n')
         with pytest.raises(ValueError, match="line 2"):
             load_prompts(path)
 
@@ -247,7 +292,7 @@ class TestLoadPrompts:
 
     def test_limit_is_applied(self, project: Path) -> None:
         (project / "prompts.jsonl").write_text(
-            '{"id":"a","prompt":"x"}\n{"id":"b","prompt":"y"}\n'
+            '{"prompt":"x"}\n{"prompt":"y"}\n'
         )
         (project / "jorm.yaml").write_text(BASE_CONFIG + "  limit: 1\n")
         config = load_config(project / "jorm.yaml", apply_env=False)
@@ -340,3 +385,60 @@ class TestCompileToImageSpec:
 
     def test_airgap_setting_reaches_the_image(self, project: Path) -> None:
         assert "FACTORY_AIRGAP_ENABLED=true" in self.compiled(project).runtime.dockerfile
+
+
+class TestTeichFormatCompatibility:
+    """A real Teich prompts.jsonl must load without modification.
+
+    Fixture mirrors the field combinations found in teich/examples/prompts.jsonl
+    (verified against the real file: 196 records, 143 multi-turn, 47 with a
+    system prompt, 14 with a github_repo).
+    """
+
+    @property
+    def fixture(self) -> Path:
+        return Path(__file__).parent.parent / "fixtures" / "teich_prompts.jsonl"
+
+    def test_loads_unmodified(self) -> None:
+        records = load_prompts(self.fixture)
+        assert len(records) == 5
+
+    def test_ids_are_derived_and_unique(self) -> None:
+        ids = [r.id for r in load_prompts(self.fixture)]
+        assert ids == [f"prompt-{i:04d}" for i in range(5)]
+
+    def test_multi_turn_is_preserved_in_order(self) -> None:
+        record = load_prompts(self.fixture)[1]
+        assert record.user_turns == (
+            "Draft a project plan for a data pipeline.",
+            "Can you draw some mermaid diagrams to illustrate it?",
+            "Now add a risk checklist",
+        )
+
+    def test_github_repo_becomes_a_clonable_workspace(self) -> None:
+        record = load_prompts(self.fixture)[2]
+        assert record.workspace.type == "git"
+        assert record.workspace.repo.endswith("fastapi/full-stack-fastapi-template")
+
+    def test_system_prompt_is_kept(self) -> None:
+        record = load_prompts(self.fixture)[3]
+        assert record.system.startswith("You are a terse frontend engineer")
+
+    def test_literal_none_system_is_treated_as_unset(self) -> None:
+        # Teich's own normalization: the string "none" means no system prompt.
+        assert load_prompts(self.fixture)[4].system is None
+
+    def test_system_reaches_droid_as_a_flag(self) -> None:
+        from jormungandr.runtime.invocation import invocation_for
+
+        record = load_prompts(self.fixture)[3]
+        call = invocation_for("droid").build(record.prompt, system=record.system)
+        assert "--append-system-prompt" in call.argv
+        assert record.system in call.argv
+
+    def test_opencode_has_no_system_flag_so_uses_agents_md(self) -> None:
+        # `opencode run --help` lists no system-prompt option, so the file
+        # convention is the only route. Silently dropping it would be worse.
+        from jormungandr.runtime.invocation import invocation_for
+
+        assert invocation_for("opencode").system_via == "agents_md"

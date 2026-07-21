@@ -99,6 +99,7 @@ class PromptRunner:
         image: str,
         prompts: Sequence[str],
         model: str | None = None,
+        system: str | None = None,
         env: Mapping[str, str] | None = None,
         env_files: Sequence[str] = (),
         mounts: Sequence[str] = (),
@@ -131,7 +132,7 @@ class PromptRunner:
         turns: list[TurnResult] = []
         with self.runtime.session(spec) as session:
             for index, prompt in enumerate(prompts):
-                call = how.build(prompt, model=model)
+                call = how.build(prompt, model=model, system=system)
                 result = self._exec(session, call, timeout=timeout)
                 turns.append(TurnResult.from_command(index, prompt, result))
                 # A failed turn poisons the ones after it — the session state

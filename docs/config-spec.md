@@ -168,51 +168,60 @@ output:
 
 ## Prompt records
 
-`prompts.jsonl`, one JSON object per line:
+`prompts.jsonl` uses **Teich's format**, so an existing prompt file loads
+unchanged:
 
 ```jsonl
-{"schema_version": "1", "id": "plan-001", "prompt": "Draft a compact project plan"}
-{"schema_version": "1", "id": "ui-002", "prompt": "Build a landing page", "follow_up_prompts": ["Now make it responsive", "Add dark mode"]}
-{"schema_version": "1", "id": "fix-003", "turns": [{"role": "system", "content": "You are terse."}, {"role": "user", "content": "Fix the failing test"}], "workspace": {"type": "git", "repo": "https://github.com/acme/app", "ref": "a1b2c3d"}, "overrides": {"model": "local/qwen", "timeout": 1800}, "tags": ["regression"], "metadata": {"difficulty": "hard"}}
+{"prompt": "Draft a compact project plan"}
+{"prompt": "Build a landing page", "follow_up_prompts": ["Make it responsive", "Add dark mode"]}
+{"prompt": "Add tests", "system": "Be terse.", "github_repo": "acme/app"}
 ```
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | string, required | Lets the format migrate instead of being sniffed. |
-| `id` | string, required | Stable, caller-supplied. Names the output and makes runs resumable. |
-| `prompt` / `turns` | string / `[{role, content}]` | Exactly one. `turns` is canonical; `prompt` (+ `follow_up_prompts`) is sugar normalized into it at load. |
-| `workspace` | tagged union | `{"type":"none"}` \| `{"type":"local","path":…}` \| `{"type":"git","repo":…,"ref":…}` |
-| `overrides` | object | Per-record `{model, timeout, max_turns}`. Run config is the base; these win per key. |
-| `tags` | string[] | Curation/selection. |
-| `metadata` | object | Free-form. Benchmark-specific data lives here, not in the run fields. |
+| `prompt` | string, required | The first turn. |
+| `follow_up_prompts` | string[] | Further turns in the same session. |
+| `system` | string | System/developer instruction. The literal `"none"` means unset, as in Teich. |
+| `github_repo` | `owner/repo` | Cloned into the working directory. |
+| `image` | string | Present in Teich's schema; rejected here, see below. |
 
-Deliberate choices, against Teich's equivalent (`PromptInput`,
-`src/teich/config.py:244`) and the benchmark formats:
+Verified against Teich's real files: `examples/prompts.jsonl` (196 records, 143
+multi-turn, 47 with a system prompt, 14 with a repo), `agent_prompts.jsonl`
+(237) and `chat_prompts.jsonl` (133) all load without modification.
 
-- **`id` is required and never derived from the prompt text.** Teich hashes the
-  prompt to identify a run (`runner.py:582`), so two identical prompts collide
-  and editing a prompt silently creates a new task rather than showing a diff
-  on an existing one. SWE-agent makes the same mistake.
-- **`turns` is a role list, not a list of strings.** Teich's
-  `follow_up_prompts: list[str]` cannot express a leading system turn or an
-  assistant prefill. The role form is strictly more expressive and matches
-  Inspect AI's `input: str | list[ChatMessage]`. Teich's spelling is accepted
-  as sugar and normalized, so existing files still load.
-- **Overrides are namespaced.** Sprinkling `model`/`timeout` at the top level
-  blurs "what to run" with "how to run it"; one `overrides` object makes the
-  merge rule statable in one sentence.
-- **`workspace` is a tagged union, not an overloaded string.** It covers
-  Teich's `github_repo`, SWE-bench's `repo` + `base_commit`, and a plain local
-  directory without inheriting any of their assumptions.
-- **Grading data is not a run input.** SWE-bench's `FAIL_TO_PASS`,
-  `PASS_TO_PASS`, `patch`, `test_patch` are curation and scoring concerns; they
-  belong in `metadata`, not in the schema every record must satisfy.
-- **No `image` per record.** Teich models it, then raises "not supported yet" if
-  used (`config.py:544-548`) — dead schema surface that looks supported. It
-  also implies one run could span several environments; if two records need
-  different images, that is two runs.
-- **Unknown keys are an error**, not silently dropped. Silent drops are the
-  worst failure mode for a format people hand-author.
+Two optional additions, neither required by a Teich file:
+
+- **`id`** — Teich identifies a run by hashing the prompt text, so two
+  identical prompts collide and editing a prompt silently creates a new run
+  rather than showing a diff on the existing one. Output directories need a
+  name, so an id is derived from the record's *position* when absent: stable
+  for a given file, never colliding. Supply one explicitly if you expect to
+  reorder the file.
+- **`overrides`** — per-record `timeout` and `max_turns`. Deliberately no
+  `model`: model selection is baked into the image, so varying it per record
+  would mean an image per record. To compare models, run the config twice.
+
+`workspace` is also accepted directly, for a local directory — something
+Teich's format cannot express. `github_repo` is sugar for the git form.
+
+**`image` is rejected at parse time.** Teich models the field and then raises
+"not supported yet" at use time, after the banner has printed and directories
+exist. Rejecting it during validation names the offending record instead. One
+run builds one image; two images means two runs.
+
+### System prompts are delivered per harness
+
+Another place the harnesses diverge, and one that has to be handled rather than
+assumed away:
+
+| Harness | Route |
+|---|---|
+| droid | `--append-system-prompt <text>` |
+| opencode | `AGENTS.md` in the working directory — `opencode run` exposes **no** system-prompt flag |
+
+The `AGENTS.md` is *appended*, not overwritten: a cloned repository may ship its
+own, and silently discarding the project's instructions to inject ours would
+change the agent's behaviour in a way nobody asked for.
 
 ## Design rules
 
