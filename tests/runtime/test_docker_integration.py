@@ -274,7 +274,7 @@ class TestPromptRunnerAgainstRealContainers:
                         "chmod +x /usr/local/bin/droid"
                     ),
                 },
-                {"name": "workspace"},
+                {"name": "user"}, {"name": "workdir"},
             ],
         )
         builder = ImageBuilder(state_dir=tmp_path_factory.mktemp("runner"), docker=docker)
@@ -343,3 +343,90 @@ class TestPromptRunnerAgainstRealContainers:
         runner.run(harness="droid", image=stub_image, prompts=["x"])
         after = {c.get("ID") for c in docker.list_containers()}
         assert after <= before
+
+
+class TestConfigCompilesToAWorkingImage:
+    """config file -> ImageSpec -> image -> the harness actually reads it.
+
+    The unit tests prove the translation produces the right JSON; only a real
+    build proves the file lands where the harness looks, with permissions that
+    let it work.
+    """
+
+    CONFIG = """
+version: 1
+providers:
+  openrouter:
+    kind: openai-compatible
+    base_url: https://openrouter.ai/api/v1
+    api_key: ${OPENROUTER_API_KEY}
+    models:
+      deepseek: deepseek/deepseek-v4-flash
+harness:
+  name: droid
+  model: openrouter/deepseek
+  droid:
+    airgap: true
+prompts:
+  file: ./prompts.jsonl
+image:
+  base_image: node:22-bookworm-slim
+  repository: jormungandr-cfg-test
+  modules:
+    - {name: node, preinstalled: true}
+"""
+
+    @pytest.fixture(scope="class")
+    @staticmethod
+    def built(docker: DockerCli, tmp_path_factory):
+        from jormungandr.config import compile_image_spec, load_config
+        from jormungandr.runtime.build import ImageBuilder
+
+        project = tmp_path_factory.mktemp("cfg")
+        (project / "jorm.yaml").write_text(TestConfigCompilesToAWorkingImage.CONFIG)
+        (project / "prompts.jsonl").write_text('{"id":"a","prompt":"hi"}\n')
+        config = load_config(project / "jorm.yaml", apply_env=False)
+        builder = ImageBuilder(state_dir=tmp_path_factory.mktemp("state"), docker=docker)
+        result = builder.build(compile_image_spec(config))
+        yield result
+        for layer in reversed(result.layers):
+            docker.remove_image(layer.reference, force=True)
+
+    def test_home_is_correct_and_writable(self, docker, built) -> None:
+        runtime = ContainerRuntime(docker=docker, install_handlers=False)
+        with runtime.session(ContainerSpec(image=built.reference)) as session:
+            result = session.shell('echo "$HOME"; test -w "$HOME" && echo writable')
+        assert "/home/agent" in result.stdout
+        assert "writable" in result.stdout
+
+    def test_config_is_baked_where_the_harness_looks(self, docker, built) -> None:
+        runtime = ContainerRuntime(docker=docker, install_handlers=False)
+        with runtime.session(ContainerSpec(image=built.reference)) as session:
+            result = session.shell('cat "$HOME/.factory/settings.json"')
+        document = json.loads(result.stdout)
+        assert document["customModels"][0]["baseUrl"] == "https://openrouter.ai/api/v1"
+        # Written literally: droid expands it at run time, so no credential
+        # ever enters an image layer.
+        assert document["customModels"][0]["apiKey"] == "${OPENROUTER_API_KEY}"
+
+    def test_the_harness_resolves_the_model_id_we_computed(self, docker, built) -> None:
+        # The load-bearing check. droid derives custom:<displayName>-<index>
+        # itself; if our arithmetic disagreed, sessionDefaultSettings would name
+        # a model that does not exist and every run would fail.
+        runtime = ContainerRuntime(docker=docker, install_handlers=False)
+        with runtime.session(ContainerSpec(image=built.reference)) as session:
+            listing = session.shell(
+                "FACTORY_AIRGAP_ENABLED=true droid exec -m bogus x 2>&1 | head -40"
+            ).stdout
+            baked = json.loads(session.shell('cat "$HOME/.factory/settings.json"').stdout)
+        expected = baked["sessionDefaultSettings"]["model"]
+        assert expected in listing, f"droid does not know {expected}\n{listing}"
+
+    def test_the_harness_can_write_beside_its_config(self, docker, built) -> None:
+        # COPY --chown only affects the file; the directory mkdir -p created as
+        # root must be chowned too, or droid's first run dies with EACCES
+        # creating .factory/sessions.
+        runtime = ContainerRuntime(docker=docker, install_handlers=False)
+        with runtime.session(ContainerSpec(image=built.reference)) as session:
+            result = session.shell('mkdir -p "$HOME/.factory/sessions" && echo ok')
+        assert result.ok and "ok" in result.stdout
