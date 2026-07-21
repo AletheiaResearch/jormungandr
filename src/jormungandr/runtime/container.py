@@ -85,6 +85,7 @@ class ContainerSession:
         workdir: str | None = None,
         env: Mapping[str, str] | None = None,
         max_output: int = 10 * 1024 * 1024,
+        stdin: str | None = None,
     ) -> CommandResult:
         """Run a command inside the container."""
         return self._docker.exec(
@@ -95,7 +96,23 @@ class ContainerSession:
             workdir=workdir,
             env=env,
             max_output=max_output,
+            stdin=stdin,
         )
+
+    def exec_with_stdin(
+        self,
+        command: Sequence[str],
+        *,
+        stdin: str | None,
+        timeout: float | None = None,
+        **kwargs,
+    ) -> CommandResult:
+        """Run a command, feeding ``stdin`` to it.
+
+        Prompts travel this way rather than on argv, where they would be
+        visible in the host process table and recorded in `docker inspect`.
+        """
+        return self.exec(command, timeout=timeout, stdin=stdin, **kwargs)
 
     def shell(
         self,

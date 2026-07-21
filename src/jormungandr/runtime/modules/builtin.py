@@ -508,11 +508,15 @@ class Workspace:
         path: str = "/workspace",
         user: str = "agent",
         uid: int = 1000,
+        # /bin/sh, not /bin/bash: alpine has no bash, and a module that only
+        # works on Debian derivatives is not a general one.
+        shell: str = "/bin/sh",
         name: str = "workspace",
     ) -> None:
         self.name = name
         self.path = _safe_token(path, what="workspace path")
         self.user = _safe_token(user, what="workspace user")
+        self.shell = _safe_token(shell, what="workspace shell")
         self.uid = _safe_uid(uid)
 
     @property
@@ -527,13 +531,21 @@ class Workspace:
             # leave a Dockerfile whose USER instruction then fails. Create the
             # user only if absent, and allow a shared uid so the container uid
             # can still match the host's.
+            # useradd is shadow-utils and absent on alpine, which provides
+            # busybox adduser instead — with different flags and no support for
+            # a duplicate uid. Try each in turn, then fall back to letting the
+            # system pick a uid, so this works on both families rather than
+            # only on Debian derivatives.
             Run(
                 [
                     f"if ! id -u {self.user} >/dev/null 2>&1; then "
                     f"useradd --create-home --non-unique --uid {self.uid} "
-                    f"--shell /bin/bash {self.user}; fi",
+                    f"--shell {self.shell} {self.user} 2>/dev/null "
+                    f"|| adduser -D -u {self.uid} -h {self.home} "
+                    f"-s {self.shell} {self.user} 2>/dev/null "
+                    f"|| adduser -D -h {self.home} -s {self.shell} {self.user}; fi",
                     f"mkdir -p {self.path} {self.home}",
-                    f"chown -R {self.uid} {self.path} {self.home}",
+                    f"chown -R {self.user} {self.path} {self.home}",
                 ]
             ),
             Workdir(self.path),
@@ -549,7 +561,13 @@ class Workspace:
         ]
 
     def identity(self) -> Mapping[str, object]:
-        return {"path": self.path, "user": self.user, "uid": self.uid, "home": self.home}
+        return {
+            "path": self.path,
+            "user": self.user,
+            "uid": self.uid,
+            "home": self.home,
+            "shell": self.shell,
+        }
 
 
 def register_builtins(registry=REGISTRY) -> None:

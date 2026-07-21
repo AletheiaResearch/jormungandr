@@ -10,6 +10,8 @@ process inside a container.
 
 from __future__ import annotations
 
+import json
+import shlex
 import socket
 import sys
 import uuid
@@ -234,3 +236,110 @@ class TestExecResourceSafety:
             # The docker exec client is gone; confirm we can still drive the
             # container, i.e. the timeout did not wedge it.
             assert session.exec(["true"]).exit_code == 0
+
+
+class TestPromptRunnerAgainstRealContainers:
+    """The runner's contract, exercised against a real daemon.
+
+    A stub 'harness' stands in for a real agent CLI so these stay hermetic and
+    free: what is under test is prompt delivery, turn sequencing, session
+    continuity and state collection — not any vendor's inference.
+    """
+
+    @pytest.fixture(scope="class")
+    @staticmethod
+    def stub_image(docker: DockerCli, tmp_path_factory):
+        from jormungandr.runtime.build import ImageBuilder
+
+        # A fake harness that echoes its stdin prompt and appends to a session
+        # file under HOME, mimicking what droid/opencode do.
+        stub = (
+            "#!/bin/sh\n"
+            'prompt="$(cat)"\n'
+            'mkdir -p "$HOME/.factory/sessions"\n'
+            'printf "%s\\n" "$prompt" >> "$HOME/.factory/sessions/log.txt"\n'
+            'printf "handled: %s\\n" "$prompt"\n'
+            '[ "$prompt" = "FAIL" ] && exit 3\n'
+            "exit 0\n"
+        )
+        spec = ImageSpec(
+            base_image="alpine:3.20",
+            repository="jormungandr-runner-test",
+            modules=[
+                {
+                    "name": "script",
+                    "content": (
+                        "mkdir -p /usr/local/bin && "
+                        f"printf '%s' {shlex.quote(stub)} > /usr/local/bin/droid && "
+                        "chmod +x /usr/local/bin/droid"
+                    ),
+                },
+                {"name": "workspace"},
+            ],
+        )
+        builder = ImageBuilder(state_dir=tmp_path_factory.mktemp("runner"), docker=docker)
+        result = builder.build(spec)
+        yield result.reference
+        for layer in reversed(result.layers):
+            docker.remove_image(layer.reference, force=True)
+
+    @pytest.fixture
+    def runner(self, docker: DockerCli):
+        from jormungandr.runtime.run import PromptRunner
+
+        return PromptRunner(
+            runtime=ContainerRuntime(docker=docker, install_handlers=False)
+        )
+
+    def test_prompt_reaches_the_harness_on_stdin(self, runner, stub_image) -> None:
+        run = runner.run(harness="droid", image=stub_image, prompts=["hello world"])
+        assert run.ok, run.turns[0].stderr
+        assert "handled: hello world" in run.turns[0].stdout
+
+    def test_prompt_never_appears_in_argv(self, runner, stub_image, docker) -> None:
+        # If the prompt were on argv it would show up in `docker inspect`.
+        secret = "prompt-that-must-not-leak-9f3a"
+        runner.run(harness="droid", image=stub_image, prompts=[secret])
+        for container in docker.list_containers():
+            blob = json.dumps(container)
+            assert secret not in blob
+
+    def test_multi_turn_shares_session_state(self, runner, stub_image) -> None:
+        # Later turns must see what earlier ones wrote — that is the whole
+        # reason multi-turn runs reuse one container.
+        run = runner.run(
+            harness="droid", image=stub_image, prompts=["first", "second", "third"]
+        )
+        assert run.ok
+        assert [t.index for t in run.turns] == [0, 1, 2]
+        assert "handled: third" in run.turns[2].stdout
+
+    def test_failure_stops_the_remaining_turns(self, runner, stub_image) -> None:
+        run = runner.run(
+            harness="droid", image=stub_image, prompts=["ok", "FAIL", "never-runs"]
+        )
+        assert not run.ok
+        assert len(run.turns) == 2
+        assert run.turns[1].exit_code == 3
+
+    def test_state_is_collected_out_of_the_container(
+        self, runner, stub_image, tmp_path
+    ) -> None:
+        out = tmp_path / "artifacts"
+        run = runner.run(
+            harness="droid",
+            image=stub_image,
+            prompts=["alpha", "beta"],
+            collect_state_to=out,
+        )
+        assert run.artifacts == out
+        collected = list(out.rglob("log.txt"))
+        assert collected, f"nothing collected into {out}: {list(out.rglob('*'))}"
+        body = collected[0].read_text()
+        assert "alpha" in body and "beta" in body
+
+    def test_container_is_gone_afterwards(self, runner, stub_image, docker) -> None:
+        before = {c.get("ID") for c in docker.list_containers()}
+        runner.run(harness="droid", image=stub_image, prompts=["x"])
+        after = {c.get("ID") for c in docker.list_containers()}
+        assert after <= before

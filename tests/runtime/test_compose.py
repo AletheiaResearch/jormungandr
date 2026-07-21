@@ -424,7 +424,7 @@ class TestWorkspaceHome:
     def test_home_is_created_and_owned(self) -> None:
         out = compose(spec(modules=[{"name": "workspace"}])).runtime.dockerfile
         assert "mkdir -p /workspace /home/agent" in out
-        assert "chown -R 1000 /workspace /home/agent" in out
+        assert "chown -R agent /workspace /home/agent" in out
 
     def test_home_is_in_the_digest(self) -> None:
         a = compose(spec(modules=[{"name": "workspace", "user": "a"}])).runtime.digest

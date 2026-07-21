@@ -329,6 +329,7 @@ class DockerCli:
         workdir: str | None = None,
         env: Mapping[str, str] | None = None,
         max_output: int = 10 * 1024 * 1024,
+        stdin: str | None = None,
     ) -> CommandResult:
         """Run a command in a container, with a real timeout and a real exit code.
 
@@ -342,6 +343,10 @@ class DockerCli:
           object, so a chatty process can exhaust host memory.
         """
         args = ["exec"]
+        if stdin is not None:
+            # Without -i the container's stdin is closed immediately, so a
+            # harness reading its prompt from stdin sees EOF and does nothing.
+            args.append("-i")
         if user:
             args += ["--user", user]
         if workdir:
@@ -356,6 +361,7 @@ class DockerCli:
         try:
             proc = subprocess.Popen(
                 argv,
+                stdin=subprocess.PIPE if stdin is not None else None,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -363,6 +369,14 @@ class DockerCli:
             )
         except FileNotFoundError as exc:
             raise DockerNotAvailable(f"{self.executable!r} not found on PATH") from exc
+
+        if stdin is not None and proc.stdin is not None:
+            # Write and close before waiting: the harness blocks until it sees
+            # EOF, and we block until it exits, so leaving the pipe open
+            # deadlocks both sides.
+            with contextlib.suppress(BrokenPipeError, OSError):
+                proc.stdin.write(stdin)
+                proc.stdin.close()
 
         # Drain both pipes in threads, discarding past the cap as we go.
         # proc.communicate() would buffer the entire stream before any
