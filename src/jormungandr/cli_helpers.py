@@ -24,8 +24,15 @@ def require(module: str, extra: str) -> Any:
 
 
 def configure_logging(*, verbose: bool = False) -> None:
+    """Quiet by default.
+
+    Commands print their own progress in a form meant to be read; internal INFO
+    logs carry a level and a logger name that only add noise beside it. At
+    WARNING the default output is exactly what the command chose to say, and
+    anything genuinely unexpected still surfaces.
+    """
     logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
+        level=logging.DEBUG if verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
@@ -35,7 +42,22 @@ def install_error_handler() -> None:
     if os.environ.get("JORMUNGANDR_TRACEBACK"):
         return
 
-    expected = (MissingExtra, FileNotFoundError, PermissionError, ValueError)
+    # ExecutionError and the docker errors are RuntimeErrors, so they are
+    # named explicitly rather than catching RuntimeError wholesale — a genuine
+    # internal bug should still produce a traceback.
+    from jormungandr.execute import ExecutionError
+    from jormungandr.runtime.build import BuildError
+    from jormungandr.runtime.docker import DockerError
+
+    expected = (
+        MissingExtra,
+        FileNotFoundError,
+        PermissionError,
+        ValueError,
+        ExecutionError,
+        BuildError,
+        DockerError,
+    )
 
     def hook(exc_type, exc, tb):
         if issubclass(exc_type, KeyboardInterrupt):

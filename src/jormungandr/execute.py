@@ -28,7 +28,13 @@ from jormungandr.runtime.invocation import invocation_for
 from jormungandr.runtime.run import HarnessRun, PromptRunner
 from jormungandr.runtime.spec import ContainerSpec, ResourceLimits
 
-__all__ = ["ExecutionError", "ExecutionReport", "RecordResult", "execute"]
+__all__ = [
+    "ExecutionError",
+    "ExecutionReport",
+    "RecordResult",
+    "env_file_names",
+    "execute",
+]
 
 log = logging.getLogger(__name__)
 
@@ -300,7 +306,7 @@ def execute(
     # build and N container starts.
     environ = available_env if available_env is not None else set(os.environ)
     for path in config.run.env_files:
-        environ |= _env_file_names(Path(path))
+        environ |= env_file_names(Path(path))
     missing = config.missing_env(environ)
     if missing:
         raise ExecutionError(
@@ -361,7 +367,7 @@ def execute(
     return report
 
 
-def _env_file_names(path: Path) -> set[str]:
+def env_file_names(path: Path) -> set[str]:
     """Variable names declared in an env file, without reading their values."""
     if not path.is_file():
         return set()
