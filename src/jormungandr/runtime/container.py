@@ -30,6 +30,7 @@ import os
 import signal
 import threading
 import uuid
+import weakref
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from types import FrameType
@@ -83,6 +84,7 @@ class ContainerSession:
         user: str | None = None,
         workdir: str | None = None,
         env: Mapping[str, str] | None = None,
+        max_output: int = 10 * 1024 * 1024,
     ) -> CommandResult:
         """Run a command inside the container."""
         return self._docker.exec(
@@ -92,6 +94,7 @@ class ContainerSession:
             user=user,
             workdir=workdir,
             env=env,
+            max_output=max_output,
         )
 
     def shell(
@@ -129,11 +132,15 @@ class ContainerSession:
         """
         if self._removed:
             return
-        self._removed = True
         with contextlib.suppress(Exception):
             self._docker.stop(self.container_id, timeout=5)
         with contextlib.suppress(Exception):
             self._docker.remove_container(self.container_id, force=True)
+        # Marked done only after the work actually happened. Setting this first
+        # means an interrupted removal (KeyboardInterrupt is not an Exception,
+        # so it escapes the suppressions above) marks itself complete, and the
+        # retry from atexit silently skips a container that is still running.
+        self._removed = True
 
 
 class ContainerRuntime:
@@ -149,7 +156,13 @@ class ContainerRuntime:
         self.docker = docker or DockerCli()
         self.owner = owner or f"{os.getpid()}@{_hostname()}"
         self._live: dict[str, ContainerSession] = {}
-        self._lock = threading.Lock()
+        # Reentrant: the signal handler calls shutdown() on the main thread, and
+        # a plain Lock would deadlock against it if the signal arrived while
+        # that same thread already held the lock inside create()/session()/reap.
+        # The window is a few bytecodes wide, but the failure is an unkillable
+        # hang whose only escape is SIGKILL — the exact case this class exists
+        # to avoid.
+        self._lock = threading.RLock()
         self._handlers_installed = False
         if install_handlers:
             self._install_handlers()
@@ -164,6 +177,7 @@ class ContainerRuntime:
         name: str | None = None,
         start: bool = True,
         track: bool = True,
+        owner: str | None = None,
     ) -> ContainerSession:
         """Create a container.
 
@@ -178,7 +192,9 @@ class ContainerRuntime:
         sid = session_id or uuid.uuid4().hex[:12]
         container_name = name or f"jormungandr-{sid}"
 
-        args = self._create_args(spec, session_id=sid, name=container_name)
+        args = self._create_args(
+            spec, session_id=sid, name=container_name, owner=owner or self.owner
+        )
         container_id = self.docker.create(args)
         session = ContainerSession(
             container_id=container_id,
@@ -200,11 +216,11 @@ class ContainerRuntime:
             self._live.pop(session.container_id, None)
 
     def _create_args(
-        self, spec: ContainerSpec, *, session_id: str, name: str
+        self, spec: ContainerSpec, *, session_id: str, name: str, owner: str
     ) -> list[str]:
         args = ["--name", name, "--label", f"{MANAGED_LABEL}=true"]
         args += ["--label", f"{SESSION_LABEL}={session_id}"]
-        args += ["--label", f"{OWNER_LABEL}={self.owner}"]
+        args += ["--label", f"{OWNER_LABEL}={owner}"]
         for key, value in sorted(spec.labels.items()):
             args += ["--label", f"{key}={value}"]
 
@@ -273,54 +289,99 @@ class ContainerRuntime:
         """Containers this tool created, found by label rather than by name."""
         return self.docker.list_containers(label=f"{MANAGED_LABEL}=true")
 
-    def reap_orphans(self, *, owner: str | None = None) -> list[str]:
-        """Remove managed containers left behind by earlier runs.
+    def reap_orphans(self, *, owner: str | None = None, all_owners: bool = False) -> list[str]:
+        """Remove managed containers left behind by dead processes.
 
         This — not the signal handler — is the real guarantee, because a
         SIGKILLed process runs no handlers at all.
+
+        By default only containers whose owning process is gone are removed.
+        Reaping every managed container instead would destroy the live sessions
+        of *other* concurrently running processes, which is a far worse outcome
+        than leaving a stale container around. ``all_owners=True`` opts into the
+        indiscriminate sweep.
         """
         removed: list[str] = []
         with self._lock:
-            live = set(self._live)
+            # `docker container ls` reports 12-char IDs while `docker create`
+            # returns the full 64-char one, so these must be compared at a
+            # common width. Comparing them directly means the guard never
+            # matches and the sweep deletes this process's own live containers.
+            live_short = {cid[:12] for cid in self._live}
+
         for container in self.managed_containers():
             container_id = container.get("ID", "")
-            if not container_id or container_id in live:
+            if not container_id or container_id[:12] in live_short:
                 continue
-            if owner is not None:
-                labels = container.get("Labels", "")
-                if f"{OWNER_LABEL}={owner}" not in labels:
-                    continue
+            labels = _parse_labels(container.get("Labels", ""))
+            container_owner = labels.get(OWNER_LABEL, "")
+            if owner is not None and container_owner != owner:
+                continue
+            if not all_owners and not _owner_is_dead(container_owner):
+                continue
             if self.docker.remove_container(container_id, force=True):
                 removed.append(container.get("Names", container_id))
         return removed
 
     def shutdown(self) -> None:
-        """Best-effort teardown of everything this process still owns."""
-        with self._lock:
-            sessions = list(self._live.values())
-            self._live.clear()
-        for session in sessions:
+        """Best-effort teardown of everything this process still owns.
+
+        Each session is discarded only after it has actually been removed. The
+        obvious alternative — clear the whole set up front, then remove — loses
+        every remaining container if the loop is interrupted, and a second
+        Ctrl-C does exactly that: the handler re-raises, unwinds out of this
+        loop, and the atexit-registered retry then finds an empty set and does
+        nothing.
+        """
+        while True:
+            with self._lock:
+                if not self._live:
+                    return
+                container_id, session = next(iter(self._live.items()))
             session.remove()
+            with self._lock:
+                self._live.pop(container_id, None)
 
     def _install_handlers(self) -> None:
         if self._handlers_installed:
             return
         self._handlers_installed = True
-        atexit.register(self.shutdown)
+
+        # Weak reference: a bound method handed to atexit (or captured in a
+        # handler closure) keeps the runtime alive for the life of the process.
+        # A library creating runtimes in a loop would otherwise leak every one
+        # of them, along with a signal handler each.
+        ref = weakref.ref(self)
+
+        def shutdown_if_alive() -> None:
+            runtime = ref()
+            if runtime is not None:
+                runtime.shutdown()
+
+        atexit.register(shutdown_if_alive)
+
+        previous: dict[int, object] = {}
 
         def handle(signum: int, frame: FrameType | None) -> None:
-            self.shutdown()
+            shutdown_if_alive()
             # Restore and re-raise so the caller's own handling, and the shell's
             # view of why we died, both stay correct.
             signal.signal(signum, previous.get(signum, signal.SIG_DFL))
             os.kill(os.getpid(), signum)
 
-        previous: dict[int, object] = {}
         for signum in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(ValueError, OSError):
                 # Only the main thread may install handlers.
                 previous[signum] = signal.getsignal(signum)
                 signal.signal(signum, handle)
+
+
+DETACHED_OWNER = "detached"
+"""Owner marker for containers meant to outlive the process that made them.
+
+A detached `container run` is not an orphan, so the default sweep leaves it
+alone; `--all` still collects it.
+"""
 
 
 def _hostname() -> str:
@@ -329,3 +390,40 @@ def _hostname() -> str:
     with contextlib.suppress(Exception):
         return socket.gethostname()
     return "unknown"
+
+
+def _parse_labels(raw: str) -> dict[str, str]:
+    """Parse the comma-separated ``k=v`` list `docker ls` emits for Labels."""
+    labels: dict[str, str] = {}
+    for item in raw.split(","):
+        key, sep, value = item.partition("=")
+        if sep:
+            labels[key.strip()] = value.strip()
+    return labels
+
+
+def _owner_is_dead(owner: str) -> bool:
+    """Is the process that created a container gone?
+
+    Only decidable for containers created on this host: a pid from another
+    machine says nothing about a pid here, so those are treated as alive
+    (i.e. left alone) rather than guessed at.
+    """
+    if not owner or owner == DETACHED_OWNER:
+        return False
+    pid_text, _, host = owner.partition("@")
+    if host != _hostname():
+        return False
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return False
+    if pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False

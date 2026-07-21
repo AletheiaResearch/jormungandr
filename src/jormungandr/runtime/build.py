@@ -114,23 +114,16 @@ class ImageBuilder:
             _dockerignore(list(composed.context_files)), encoding="utf-8"
         )
 
-        declared = set(composed.context_files)
         for name, content in composed.context_files.items():
             target = context / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             target.chmod(composed.context_modes.get(name, 0o644))
 
-        # Every declared file must actually be referenced by the Dockerfile.
-        # SWE-bench only logs a warning here, which has been firing unnoticed
-        # for six of its languages — a file silently never copied in.
-        unused = {name for name in declared if name not in composed.dockerfile}
-        if unused:
-            raise BuildError(
-                composed.reference,
-                self.log_path(composed.digest),
-                f"context files never referenced by the Dockerfile: {sorted(unused)}",
-            )
+        # The "is every context file actually COPYed?" check lives in compose(),
+        # where it is a pure property of the spec. Raising it here meant raising
+        # a BuildError that advertised a build log which had not been created
+        # yet — an error pointing at a nonexistent file.
         return context
 
     # -- build ------------------------------------------------------------

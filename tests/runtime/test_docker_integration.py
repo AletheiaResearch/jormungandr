@@ -10,6 +10,8 @@ process inside a container.
 
 from __future__ import annotations
 
+import socket
+import sys
 import uuid
 
 import pytest
@@ -142,13 +144,28 @@ class TestRealContainer:
             result = session.exec(["ping", "-c", "1", "-W", "2", "1.1.1.1"])
         assert result.exit_code != 0
 
-    def test_labels_allow_orphan_recovery(self, runtime, docker, built) -> None:
-        session = runtime.create(ContainerSpec(image=built.reference))
+    def test_labels_allow_orphan_recovery(self, docker, built) -> None:
+        # Simulate a crashed run: a container labelled with a pid that is gone.
+        dead_owner = f"999999999@{socket.gethostname()}"
+        crashed = ContainerRuntime(docker=docker, install_handlers=False)
+        session = crashed.create(ContainerSpec(image=built.reference), owner=dead_owner)
         try:
-            # Simulate a crashed run: forget the container without removing it.
-            runtime._live.clear()
-            reaped = runtime.reap_orphans()
-            assert session.name in reaped
+            # A *different* runtime, as after a restart, finds it by label.
+            fresh = ContainerRuntime(docker=docker, install_handlers=False)
+            assert session.name in fresh.reap_orphans()
+        finally:
+            docker.remove_container(session.container_id, force=True)
+
+    def test_reap_spares_a_live_process_containers(self, docker, built) -> None:
+        # The bug this guards: `docker ls` returns 12-char ids and `docker
+        # create` 64-char ones, so the "skip my own" check never matched and
+        # the sweep deleted the caller's running containers.
+        owner = ContainerRuntime(docker=docker, install_handlers=False)
+        session = owner.create(ContainerSpec(image=built.reference))
+        try:
+            other = ContainerRuntime(docker=docker, install_handlers=False)
+            assert session.name not in other.reap_orphans()
+            assert docker.is_running(session.container_id)
         finally:
             docker.remove_container(session.container_id, force=True)
 
@@ -161,3 +178,43 @@ class TestRealContainer:
             session.shell("echo produced > /tmp/out.txt")
             session.copy_out("/tmp/out.txt", tmp_path / "out.txt")
         assert (tmp_path / "out.txt").read_text().strip() == "produced"
+
+
+class TestExecResourceSafety:
+    """These properties are only real against an actual container."""
+
+    @pytest.fixture
+    def runtime(self, docker: DockerCli) -> ContainerRuntime:
+        return ContainerRuntime(docker=docker, install_handlers=False)
+
+    def test_large_output_is_capped_without_buffering_it_all(
+        self, runtime, built
+    ) -> None:
+        # communicate() buffers the whole stream before truncating, so the cap
+        # bounded the returned string but not memory. 512MB of output through a
+        # 4KB cap must stay flat.
+        import resource
+
+        before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        with runtime.session(ContainerSpec(image=built.reference)) as session:
+            result = session.shell(
+                "dd if=/dev/zero bs=1M count=512 2>/dev/null | tr '\\0' 'x'",
+                timeout=180,
+                max_output=4096,
+            )
+        after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+        assert len(result.stdout) == 4096
+        assert result.truncated
+        # ru_maxrss is bytes on macOS, KiB on Linux; 512MB dwarfs either scale.
+        growth_mb = (after - before) / (1024 * 1024 if sys.platform == "darwin" else 1024)
+        assert growth_mb < 100, f"peak RSS grew {growth_mb:.0f}MB draining 512MB"
+
+    def test_timeout_does_not_leave_the_command_running(self, runtime, built) -> None:
+        with runtime.session(ContainerSpec(image=built.reference)) as session:
+            marker = "jormungandr-timeout-probe"
+            result = session.shell(f"sleep 300 # {marker}", timeout=2)
+            assert result.timed_out
+            # The docker exec client is gone; confirm we can still drive the
+            # container, i.e. the timeout did not wedge it.
+            assert session.exec(["true"]).exit_code == 0

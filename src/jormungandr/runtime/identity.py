@@ -48,19 +48,37 @@ _TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
 _NAME_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$")
 
 
-def canonical_json(value: Any) -> str:
-    """Serialize deterministically: sorted keys, no insignificant whitespace.
+def _canonicalize(value: Any) -> Any:
+    """Reduce a value to something JSON can serialize deterministically.
 
-    ``sort_keys`` makes the digest independent of dict construction order, and
-    ``default=str`` keeps the function total so an unexpected type degrades to a
-    stable string instead of raising deep inside a build.
+    Sets are sorted (their iteration order varies with PYTHONHASHSEED), and
+    anything else unserializable is rejected rather than coerced with ``str()``.
+    A ``str()`` fallback looks harmless but is a correctness hole: ``str(set)``
+    varies per interpreter run and ``str(object)`` embeds a memory address, so a
+    module returning either from ``identity()`` would get a fresh digest — and a
+    full rebuild — on every invocation, silently.
     """
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Mapping):
+        return {str(k): _canonicalize(v) for k, v in value.items()}
+    if isinstance(value, (set, frozenset)):
+        return sorted(_canonicalize(v) for v in value)
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize(v) for v in value]
+    raise TypeError(
+        f"cannot hash {type(value).__name__} deterministically: {value!r}. "
+        "Return only JSON-native types (or sets) from Module.identity()."
+    )
+
+
+def canonical_json(value: Any) -> str:
+    """Serialize deterministically: sorted keys, no insignificant whitespace."""
     return json.dumps(
-        value,
+        _canonicalize(value),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
-        default=str,
     )
 
 
@@ -68,6 +86,7 @@ def content_digest(
     *,
     dockerfile: str,
     context_files: Mapping[str, str] | None = None,
+    context_modes: Mapping[str, int] | None = None,
     extra: Mapping[str, Any] | None = None,
 ) -> str:
     """Hash everything that determines the built image.
@@ -90,9 +109,14 @@ def content_digest(
         hasher.update(f"{section}:{len(encoded)}:".encode("ascii"))
         hasher.update(encoded)
 
+    files = context_files or {}
+    modes = context_modes or {}
     feed("dockerfile", dockerfile)
-    for path in sorted(context_files or {}):
-        feed(f"file:{path}", (context_files or {})[path])
+    for path in sorted(files):
+        feed(f"file:{path}", files[path])
+        # Mode is part of the image: a script that goes from 0644 to 0755
+        # changes what the build produces without changing a byte of content.
+        feed(f"mode:{path}", oct(modes.get(path, 0o644)))
     feed("extra", canonical_json(dict(extra or {})))
 
     return hasher.hexdigest()[:DIGEST_LENGTH]

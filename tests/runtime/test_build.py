@@ -8,6 +8,7 @@ import pytest
 from jormungandr.runtime.build import BuildError, ImageBuilder
 from jormungandr.runtime.compose import compose
 from jormungandr.runtime.docker import CommandResult, DockerCli, DockerError
+from jormungandr.runtime.layers import Run
 from jormungandr.runtime.modules import builtin  # noqa: F401
 from jormungandr.runtime.spec import ImageSpec
 
@@ -90,15 +91,33 @@ class TestWriteContext:
         assert builder.log_path(composed.digest) not in context.parents
         assert builder.log_path(composed.digest).parent != context
 
-    def test_unreferenced_context_file_is_a_hard_error(
-        self, builder: ImageBuilder, monkeypatch
+    def test_context_validation_happens_before_any_build_log_is_promised(
+        self, builder: ImageBuilder
     ) -> None:
-        # SWE-bench only warns here, and the warning has been firing unnoticed
-        # for six of its languages.
-        composed = compose(simple_spec(modules=[{"name": "script", "content": "echo x"}]))
-        object.__setattr__(composed, "dockerfile", "FROM debian:trixie-slim\n")
-        with pytest.raises(BuildError, match="never referenced"):
-            builder.write_context(composed)
+        # This check now lives in compose(), where it is a pure property of the
+        # spec. Raising it from write_context meant raising a BuildError that
+        # advertised a build log which had not been created yet.
+        from jormungandr.runtime.compose import ComposeError
+        from jormungandr.runtime.modules.base import Stage
+
+        class OrphanFile:
+            name = "orphan"
+            stage = Stage.USER
+            requires = ()
+
+            def instructions(self, context):
+                context.add_file("never-copied.sh", "echo hi")
+                return [Run("true")]
+
+            def identity(self):
+                return {}
+
+        from jormungandr.runtime.modules.registry import ModuleRegistry
+
+        registry = ModuleRegistry()
+        registry.register("orphan", OrphanFile)
+        with pytest.raises(ComposeError, match="no COPY"):
+            compose(simple_spec(modules=[{"name": "orphan"}]), registry=registry)
 
 
 class TestBuild:

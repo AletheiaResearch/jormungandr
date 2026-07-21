@@ -140,11 +140,24 @@ def container_list() -> None:
 
 
 @container_app.command(name="reap")
-def container_reap() -> None:
-    """Remove containers left behind by crashed runs."""
+def container_reap(
+    *,
+    all_owners: Annotated[
+        bool,
+        Parameter(
+            name=["--all"],
+            help="Also remove containers owned by live processes and detached runs.",
+        ),
+    ] = False,
+) -> None:
+    """Remove containers left behind by crashed runs.
+
+    By default only containers whose owning process is gone, so a concurrent
+    session's live containers are left alone.
+    """
     from jormungandr.commands.container import reap_containers
 
-    removed = reap_containers()
+    removed = reap_containers(all_owners=all_owners)
     print(f"reaped {len(removed)} container(s)")
     for name in removed:
         print(f"  {name}")

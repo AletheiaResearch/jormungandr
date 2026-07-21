@@ -20,11 +20,13 @@ which is contained here and unit-tested.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -58,6 +60,39 @@ class DockerNotAvailable(DockerError):
         self.argv = ()
         self.returncode = -1
         self.stderr = detail
+
+
+class _CappedSink:
+    """Consumes a pipe, keeping at most ``cap`` characters.
+
+    Reading continues past the cap so the writer never blocks on a full pipe;
+    the excess is counted and discarded rather than stored.
+    """
+
+    def __init__(self, cap: int) -> None:
+        self.cap = cap
+        self._chunks: list[str] = []
+        self._kept = 0
+        self.truncated = False
+
+    def drain(self, pipe) -> None:
+        if pipe is None:
+            return
+        with contextlib.suppress(Exception):
+            while True:
+                chunk = pipe.read(65536)
+                if not chunk:
+                    break
+                room = self.cap - self._kept
+                if room > 0:
+                    self._chunks.append(chunk[:room])
+                    self._kept += min(room, len(chunk))
+                if len(chunk) > room:
+                    self.truncated = True
+
+    @property
+    def text(self) -> str:
+        return "".join(self._chunks)
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,8 +195,17 @@ class DockerCli:
                 del tail[:-40]
                 yield stripped
         finally:
-            proc.stdout.close()
-            returncode = proc.wait()
+            with contextlib.suppress(Exception):
+                proc.stdout.close()
+            try:
+                returncode = proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                # Reached when the caller abandons the generator (a break, or an
+                # on_output callback raising) and the child neither notices the
+                # closed pipe nor exits. A bare wait() would block here for as
+                # long as the build runs.
+                self._terminate_group(proc)
+                returncode = proc.poll() if proc.poll() is not None else -1
         if returncode != 0:
             raise DockerError(argv, returncode, "\n".join(tail))
 
@@ -320,25 +364,49 @@ class DockerCli:
         except FileNotFoundError as exc:
             raise DockerNotAvailable(f"{self.executable!r} not found on PATH") from exc
 
+        # Drain both pipes in threads, discarding past the cap as we go.
+        # proc.communicate() would buffer the entire stream before any
+        # truncation, so a process that prints a gigabyte takes the host with
+        # it — the exact failure the cap is supposed to prevent.
+        out_sink = _CappedSink(max_output)
+        err_sink = _CappedSink(max_output)
+        readers = [
+            threading.Thread(target=out_sink.drain, args=(proc.stdout,), daemon=True),
+            threading.Thread(target=err_sink.drain, args=(proc.stderr,), daemon=True),
+        ]
+        for reader in readers:
+            reader.start()
+
         timed_out = False
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                self._terminate_group(proc)
+                proc.wait(timeout=10)
+        except BaseException:
+            # Any other exit from this block — KeyboardInterrupt above all —
+            # must not leave `docker exec` running, because the command it is
+            # driving keeps running inside the container.
             self._terminate_group(proc)
-            stdout, stderr = proc.communicate()
+            raise
+        finally:
+            for reader in readers:
+                reader.join(timeout=5)
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    with contextlib.suppress(Exception):
+                        pipe.close()
 
         duration = time.monotonic() - started
-        stdout = stdout or ""
-        stderr = stderr or ""
-        truncated = len(stdout) > max_output or len(stderr) > max_output
         return CommandResult(
-            exit_code=proc.returncode if not timed_out else 124,
-            stdout=stdout[:max_output],
-            stderr=stderr[:max_output],
+            exit_code=124 if timed_out else (proc.returncode or 0),
+            stdout=out_sink.text,
+            stderr=err_sink.text,
             duration=duration,
             timed_out=timed_out,
-            truncated=truncated,
+            truncated=out_sink.truncated or err_sink.truncated,
         )
 
     @staticmethod
@@ -349,10 +417,19 @@ class DockerCli:
         this reaches grandchildren too — the case a bare ``proc.terminate()``
         misses.
         """
+        if proc.returncode is not None:
+            return  # already reaped; its pid may since have been recycled
         try:
             group = os.getpgid(proc.pid)
         except (ProcessLookupError, PermissionError):
-            proc.kill()
+            with contextlib.suppress(Exception):
+                proc.kill()
+            return
+        if group == os.getpgid(0):
+            # The child was not started in its own session, so its group is
+            # ours: killing it would take down this process and its whole job.
+            with contextlib.suppress(Exception):
+                proc.kill()
             return
         for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 2.0)):
             try:

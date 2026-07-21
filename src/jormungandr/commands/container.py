@@ -47,10 +47,13 @@ def build_container_spec(
 
 
 def run_container(spec: ContainerSpec, *, name: str | None = None) -> dict[str, Any]:
-    # Untracked: this is a detached run, so the container must outlive the CLI
-    # process. It keeps its labels, so `container reap` can still find it.
+    # Untracked and owner-marked "detached": this container must outlive the CLI
+    # process, so it is neither torn down at exit nor treated as an orphan by a
+    # later reap. `reap --all` still collects it.
+    from jormungandr.runtime.container import DETACHED_OWNER
+
     runtime = ContainerRuntime(install_handlers=False)
-    session = runtime.create(spec, name=name, track=False)
+    session = runtime.create(spec, name=name, track=False, owner=DETACHED_OWNER)
     return {
         "id": session.container_id,
         "name": session.name,
@@ -77,5 +80,5 @@ def list_containers() -> list[dict[str, str]]:
     return ContainerRuntime(install_handlers=False).managed_containers()
 
 
-def reap_containers() -> list[str]:
-    return ContainerRuntime(install_handlers=False).reap_orphans()
+def reap_containers(*, all_owners: bool = False) -> list[str]:
+    return ContainerRuntime(install_handlers=False).reap_orphans(all_owners=all_owners)

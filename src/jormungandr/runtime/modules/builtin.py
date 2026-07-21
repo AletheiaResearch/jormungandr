@@ -12,6 +12,7 @@ builder cannot express this.
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Mapping, Sequence
 
 from jormungandr.runtime.layers import (
@@ -38,6 +39,58 @@ __all__ = [
     "register_builtins",
 ]
 
+_SHELL_SAFE = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-+/:@^~="
+)
+
+
+def _safe_token(value: object, *, what: str) -> str:
+    """Validate a value that will be interpolated into a shell command.
+
+    ``ModuleDeclaration`` allows extra fields and does not coerce their types,
+    so YAML hands module constructors whatever was written — including strings
+    where an int is annotated. Nothing downstream quotes these before they reach
+    a RUN body, so they are validated at the boundary instead.
+    """
+    text = str(value)
+    if not text:
+        raise ModuleError(f"{what} must not be empty")
+    bad = sorted(set(text) - _SHELL_SAFE)
+    if bad:
+        raise ModuleError(
+            f"{what} contains characters that are unsafe in a shell command: "
+            f"{''.join(bad)!r} (in {text!r})"
+        )
+    return text
+
+
+def _quoted_arg(value: object, *, what: str) -> str:
+    """Shell-quote a value that is a command *argument* rather than an identifier.
+
+    Version specifiers legitimately contain characters an identifier allowlist
+    must reject — ``langfuse>=3,<4`` is a normal PEP 440 pin, and ``^1.2.3`` a
+    normal npm one. Quoting is the right tool for those: it keeps them intact
+    and inert. Newlines are still refused, because quoting cannot save a value
+    that ends the instruction it sits in.
+    """
+    text = str(value)
+    if not text:
+        raise ModuleError(f"{what} must not be empty")
+    if "\n" in text or "\r" in text:
+        raise ModuleError(f"{what} must not contain a newline: {text!r}")
+    return shlex.quote(text)
+
+
+def _safe_uid(value: object) -> int:
+    try:
+        uid = int(value)
+    except (TypeError, ValueError):
+        raise ModuleError(f"uid must be an integer, got {value!r}") from None
+    if not 0 <= uid <= 2**31 - 1:
+        raise ModuleError(f"uid out of range: {uid}")
+    return uid
+
+
 _APT_CACHE = (
     CacheMount("/var/cache/apt", sharing="locked"),
     CacheMount("/var/lib/apt", sharing="locked"),
@@ -54,9 +107,10 @@ class AptPackages:
     requires: tuple[str, ...] = ()
 
     def __init__(self, packages: Sequence[str] = (), *, name: str = "apt") -> None:
-        cleaned = tuple(sorted({p.strip() for p in packages if p.strip()}))
+        cleaned = tuple(sorted({p.strip() for p in packages if str(p).strip()}))
         if not cleaned:
             raise ModuleError("apt module needs at least one package")
+        cleaned = tuple(_safe_token(p, what="apt package") for p in cleaned)
         self.name = name
         self.packages = cleaned
 
@@ -97,8 +151,8 @@ class NodeToolchain:
         name: str = "node",
     ) -> None:
         self.name = name
-        self.version = version
-        self.preinstalled = preinstalled
+        self.version = _safe_token(version, what="node version")
+        self.preinstalled = bool(preinstalled)
 
     def instructions(self, context: BuildContext) -> Sequence[Instruction]:
         if self.preinstalled:
@@ -135,7 +189,7 @@ class PythonToolchain:
 
     def __init__(self, *, venv: str = "/opt/venv", name: str = "python") -> None:
         self.name = name
-        self.venv = venv
+        self.venv = _safe_token(venv, what="venv path")
 
     def instructions(self, context: BuildContext) -> Sequence[Instruction]:
         return [
@@ -204,18 +258,23 @@ class AgentCli:
             )
         self.name = name or f"agent-{harness}"
         self.harness = harness
-        self.package = resolved
-        self.version = version
+        self.package = _safe_token(resolved, what="npm package")
+        self.version = str(version)
+        _quoted_arg(self.version, what="agent version")
         self.requires = tuple(requires)
 
     @property
     def spec(self) -> str:
         return f"{self.package}@{self.version}"
 
+    @property
+    def _quoted_spec(self) -> str:
+        return _quoted_arg(self.spec, what="npm install spec")
+
     def instructions(self, context: BuildContext) -> Sequence[Instruction]:
         return [
             Comment(f"agent harness: {self.harness} ({self.spec})"),
-            Run(f"npm install -g {self.spec}", mounts=_NPM_CACHE),
+            Run(f"npm install -g {self._quoted_spec}", mounts=_NPM_CACHE),
         ]
 
     def identity(self) -> Mapping[str, object]:
@@ -245,16 +304,18 @@ class Langfuse:
         requires: Sequence[str] = ("python",),
     ) -> None:
         self.name = name
-        self.host = host.rstrip("/")
-        self.version = version
+        self.host = _safe_token(host.rstrip("/"), what="langfuse host")
+        self.version = str(version)
+        _quoted_arg(self.version, what="langfuse version")
         self.requires = tuple(requires)
 
     def instructions(self, context: BuildContext) -> Sequence[Instruction]:
         return [
             Comment("langfuse tracing over OTLP"),
             Run(
-                f'pip install "langfuse{self.version}" '
-                '"opentelemetry-sdk" "opentelemetry-exporter-otlp"',
+                "pip install "
+                f'{_quoted_arg("langfuse" + self.version, what="langfuse pin")} '
+                "'opentelemetry-sdk' 'opentelemetry-exporter-otlp'",
                 mounts=_PIP_CACHE,
             ),
             # Endpoint only. LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY are
@@ -298,8 +359,8 @@ class Script:
             raise ModuleError("script module needs non-empty content")
         self.name = name
         self.content = content if content.endswith("\n") else content + "\n"
-        self.filename = filename or f"{name}.sh"
-        self.shell = shell
+        self.filename = _safe_token(filename or f"{name}.sh", what="script filename")
+        self.shell = _safe_token(shell, what="script shell")
 
     def instructions(self, context: BuildContext) -> Sequence[Instruction]:
         path = context.add_file(self.filename, self.content, mode=0o755)
@@ -335,9 +396,9 @@ class Workspace:
         name: str = "workspace",
     ) -> None:
         self.name = name
-        self.path = path
-        self.user = user
-        self.uid = uid
+        self.path = _safe_token(path, what="workspace path")
+        self.user = _safe_token(user, what="workspace user")
+        self.uid = _safe_uid(uid)
 
     def instructions(self, context: BuildContext) -> Sequence[Instruction]:
         return [

