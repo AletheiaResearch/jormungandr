@@ -430,3 +430,51 @@ class TestWorkspaceHome:
         a = compose(spec(modules=[{"name": "workspace", "user": "a"}])).runtime.digest
         b = compose(spec(modules=[{"name": "workspace", "user": "b"}])).runtime.digest
         assert a != b
+
+
+class TestDroid:
+    """Factory's droid CLI, verified against a real container."""
+
+    def test_installed_from_npm_pinned(self) -> None:
+        out = compose(spec(modules=[{"name": "node"}, {"name": "droid"}])).runtime.dockerfile
+        assert "npm install -g droid@0.176.0" in out
+        assert "droid --version" in out
+
+    def test_auto_update_disabled_by_default(self) -> None:
+        # A harness that updates itself inside a container invalidates the
+        # promise its digest makes: same digest, different software.
+        out = compose(spec(modules=[{"name": "node"}, {"name": "droid"}])).runtime.dockerfile
+        assert "FACTORY_DROID_AUTO_UPDATE_ENABLED=false" in out
+
+    def test_auto_update_can_be_re_enabled(self) -> None:
+        out = compose(
+            spec(modules=[{"name": "node"}, {"name": "droid", "auto_update": True}])
+        ).runtime.dockerfile
+        assert "FACTORY_DROID_AUTO_UPDATE_ENABLED" not in out
+
+    def test_airgap_is_opt_in(self) -> None:
+        out = compose(spec(modules=[{"name": "node"}, {"name": "droid"}])).runtime.dockerfile
+        assert "FACTORY_AIRGAP_ENABLED" not in out
+
+    def test_airgap_enables_byok_without_a_factory_account(self) -> None:
+        # Verified end to end: without this, `droid exec` opens a cloud session
+        # first and dies with 401 before ever calling the custom endpoint.
+        out = compose(
+            spec(modules=[{"name": "node"}, {"name": "droid", "airgap": True}])
+        ).runtime.dockerfile
+        assert "FACTORY_AIRGAP_ENABLED=true" in out
+
+    def test_airgap_changes_the_digest(self) -> None:
+        a = compose(spec(modules=[{"name": "node"}, {"name": "droid"}])).runtime.digest
+        b = compose(
+            spec(modules=[{"name": "node"}, {"name": "droid", "airgap": True}])
+        ).runtime.digest
+        assert a != b
+
+    def test_requires_node(self) -> None:
+        with pytest.raises(ModuleError, match="requires 'node'"):
+            compose(spec(modules=[{"name": "droid"}]))
+
+    def test_lands_in_the_runtime_tier(self) -> None:
+        result = compose(spec(modules=[{"name": "node"}, {"name": "droid"}]))
+        assert result.runtime.module_names == ("droid",)

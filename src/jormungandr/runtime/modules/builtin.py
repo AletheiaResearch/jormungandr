@@ -30,6 +30,7 @@ from jormungandr.runtime.modules.installers import Installer, NpmGlobal
 from jormungandr.runtime.modules.registry import REGISTRY
 
 __all__ = [
+    "Droid",
     "Harness",
     "OpenCode",
     "AptPackages",
@@ -314,6 +315,87 @@ class OpenCode(Harness):
         )
 
 
+class Droid(Harness):
+    """Factory's droid CLI.
+
+    Ships as an npm package with a platform-detecting install script as the
+    alternative; npm is used here for the same reason as OpenCode — it pins
+    cleanly and needs no network fetch of an unversioned shell script.
+
+    Auto-update is switched off. A harness that updates itself inside a running
+    container silently invalidates the promise its image digest makes: two
+    containers from the same digest would run different software. Pinning the
+    version in the image and disabling self-update is the only way the digest
+    stays meaningful.
+
+    Non-interactive use is ``droid exec``, which accepts a prompt on stdin.
+    Credentials come from ``FACTORY_API_KEY`` at run time and are never baked.
+
+    **Airgap and BYOK.** droid can talk to an arbitrary OpenAI- or
+    Anthropic-compatible endpoint via ``customModels`` in
+    ``~/.factory/settings.json``, which avoids paying Factory for inference.
+    That alone is not enough to run without a Factory account: ``droid exec``
+    still opens a cloud session first and dies with
+    ``401 Missing authorization token`` before it ever contacts the custom
+    endpoint. ``FACTORY_AIRGAP_ENABLED=true`` skips that call — verified by
+    running ``droid exec`` against a local stub with no credentials at all and
+    watching the request arrive.
+
+    Two further quirks worth knowing, both verified:
+
+    * ``droid exec --model custom:<id>`` is rejected ("Invalid model"); the
+      custom model must be named in ``sessionDefaultSettings.model`` instead.
+      See Factory-AI/factory#787.
+    * The endpoint is called as a streaming ``POST /v1/chat/completions`` with
+      the tool list attached, so a BYOK proxy must speak SSE, not just
+      request/response.
+    """
+
+    PACKAGE = "droid"
+    BINARY = "droid"
+    DEFAULT_VERSION = "0.176.0"
+
+    STATE_DIR = "~/.factory"
+    """Sessions, logs and caches land here, so HOME must be correct."""
+
+    def __init__(
+        self,
+        *,
+        version: str = DEFAULT_VERSION,
+        package: str | None = None,
+        name: str = "droid",
+        auto_update: bool = False,
+        airgap: bool = False,
+        requires: Sequence[str] = ("node",),
+    ) -> None:
+        super().__init__(
+            name=name,
+            installer=NpmGlobal(package or self.PACKAGE, version),
+            binary=self.BINARY,
+            requires=requires,
+        )
+        self.auto_update = bool(auto_update)
+        self.airgap = bool(airgap)
+
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+        body = list(super().instructions(context))
+        env: dict[str, str] = {}
+        if not self.auto_update:
+            env["FACTORY_DROID_AUTO_UPDATE_ENABLED"] = "false"
+        if self.airgap:
+            env["FACTORY_AIRGAP_ENABLED"] = "true"
+        if env:
+            body.append(Env(env))
+        return body
+
+    def identity(self) -> Mapping[str, object]:
+        return {
+            **super().identity(),
+            "auto_update": self.auto_update,
+            "airgap": self.airgap,
+        }
+
+
 class Langfuse:
     """Route agent LLM traffic to Langfuse over OpenTelemetry.
 
@@ -476,6 +558,7 @@ def register_builtins(registry=REGISTRY) -> None:
         "apt": AptPackages,
         "node": NodeToolchain,
         "python": PythonToolchain,
+        "droid": Droid,
         "opencode": OpenCode,
         "langfuse": Langfuse,
         "script": Script,
