@@ -84,7 +84,9 @@ class OpenCodeInvocation:
     """
 
     harness = "opencode"
-    state_paths = (".local/share/opencode",)
+    # Annotated, not inferred: a bare literal infers as tuple[str], a
+    # fixed-length type that does not satisfy the protocol's tuple[str, ...].
+    state_paths: tuple[str, ...] = (".local/share/opencode",)
     # `opencode run --help` lists no system-prompt flag, so AGENTS.md in the
     # working directory is the only route.
     system_via = "agents_md"
@@ -111,7 +113,7 @@ class DroidInvocation:
     """
 
     harness = "droid"
-    state_paths = (".factory/sessions", ".factory/logs")
+    state_paths: tuple[str, ...] = (".factory/sessions", ".factory/logs")
     system_via = "argv"
 
     def __init__(self, *, autonomy: str = "low", output_format: str = "json") -> None:

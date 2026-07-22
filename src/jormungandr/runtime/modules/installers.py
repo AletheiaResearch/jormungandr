@@ -69,7 +69,9 @@ class NpmGlobal:
     match, so the caller is expected to verify the binary afterwards.
     """
 
-    default_requires = ("node",)
+    # Annotated, not inferred: a bare literal infers as tuple[str], a
+    # fixed-length type that does not satisfy the protocol's tuple[str, ...].
+    default_requires: tuple[str, ...] = ("node",)
 
     def __init__(self, package: str, version: str) -> None:
         from jormungandr.runtime.modules.builtin import _safe_token
@@ -165,7 +167,7 @@ class GitPythonApp:
     branch pointed at when it was built.
     """
 
-    default_requires = ("python",)
+    default_requires: tuple[str, ...] = ("python",)
 
     def __init__(
         self,

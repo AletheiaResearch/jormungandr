@@ -244,7 +244,7 @@ class TestRunnerForwarding:
 
     class Recording:
         harness = "droid"
-        state_paths = ()
+        state_paths: tuple[str, ...] = ()
         system_via = "argv"
 
         def __init__(self) -> None:
