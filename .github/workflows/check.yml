@@ -1,0 +1,50 @@
+name: Run Checks and Tests
+
+on:
+  push:
+  pull_request:
+
+# A pushed branch that also has a pull request would otherwise run this twice.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tox:
+    runs-on: ubuntu-latest
+    name: Tox
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+
+      # tox-uv fetches the interpreter itself, so no setup-python step is
+      # needed. tox-gh maps this interpreter onto the [gh.python] env list.
+      - name: Install tox
+        run: >
+          uv tool install --python-preference only-managed --python 3.14
+          tox --with tox-uv --with tox-gh
+
+      - name: Run Tox
+        run: tox
+
+      # `docker` is not in env_list, so the daemon-backed tests do not run
+      # here. They are opt-in via `tox -e docker`.
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: AletheiaResearch/jormungandr
+
+      - name: Upload test results to Codecov
+        # Test results are most useful precisely when the run failed.
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: AletheiaResearch/jormungandr
