@@ -24,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from jormungandr.config.models import JormConfig
 from jormungandr.config.prompts import PromptRecord
