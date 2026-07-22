@@ -9,18 +9,22 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Actions are pinned to commit SHAs, not tags. A tag is mutable: whoever owns
+# the action can repoint v7 at any commit, and this workflow holds a repository
+# token and a Codecov token. The trailing comment is the human-readable version
+# and is what to update alongside the SHA.
 jobs:
   tox:
     runs-on: ubuntu-latest
     name: Tox
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       # v7 is the highest floating major tag this action publishes; its latest
       # release is v9.0.0 but no `v9` alias exists. v7 already runs on node24,
       # which is what the deprecation warning was about.
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           version: "latest"
           enable-cache: true
@@ -39,7 +43,7 @@ jobs:
       # here. They are opt-in via `tox -e docker`.
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: AletheiaResearch/jormungandr
@@ -49,7 +53,7 @@ jobs:
       - name: Upload test results to Codecov
         # Test results are most useful precisely when the run failed.
         if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: AletheiaResearch/jormungandr
