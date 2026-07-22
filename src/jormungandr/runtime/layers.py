@@ -209,7 +209,9 @@ class Arg:
         name = _check_single_line(self.name, what="ARG name")
         if self.default is None:
             return f"ARG {name}"
-        return f"ARG {name}={_quote(_check_single_line(self.default, what='ARG default'))}"
+        return (
+            f"ARG {name}={_quote(_check_single_line(self.default, what='ARG default'))}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,7 +361,9 @@ class Comment:
     text: str
 
     def render(self) -> str:
-        return "\n".join(f"# {line}" if line else "#" for line in self.text.splitlines())
+        return "\n".join(
+            f"# {line}" if line else "#" for line in self.text.splitlines()
+        )
 
 
 @dataclass(frozen=True, slots=True)

@@ -191,9 +191,7 @@ class PromptRunner:
         )
 
     @staticmethod
-    def _write_agents_md(
-        session: ContainerSession, workdir: str, system: str
-    ) -> None:
+    def _write_agents_md(session: ContainerSession, workdir: str, system: str) -> None:
         """Deliver a system prompt as AGENTS.md, for harnesses with no flag.
 
         Written inside the container, because the working directory comes from
@@ -230,7 +228,7 @@ class PromptRunner:
         uid is shared.
         """
         destination.mkdir(parents=True, exist_ok=True)
-        home = session.exec(["sh", "-c", "printf %s \"$HOME\""]).stdout.strip() or "/root"
+        home = session.exec(["sh", "-c", 'printf %s "$HOME"']).stdout.strip() or "/root"
         for relative in state_paths:
             source = f"{home}/{relative}"
             target = destination / relative.replace("/", "_")

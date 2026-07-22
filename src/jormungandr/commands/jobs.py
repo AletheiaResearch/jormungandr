@@ -75,8 +75,14 @@ def check(config_path: Path) -> int:
         # Worth failing on: an unset key surfaces as a 401 from the provider
         # after a full build and N container starts, not as a config error.
         _echo("")
-        _echo(f"error: missing environment variable(s): {', '.join(sorted(missing))}", err=True)
-        _echo("       set them in the environment or list a file in run.env_files", err=True)
+        _echo(
+            f"error: missing environment variable(s): {', '.join(sorted(missing))}",
+            err=True,
+        )
+        _echo(
+            "       set them in the environment or list a file in run.env_files",
+            err=True,
+        )
         return 1
     _echo(f"env       {', '.join(sorted(config.required_env))} resolved")
     _echo("")
@@ -117,7 +123,9 @@ def build(config_path: Path, *, force: bool = False, quiet: bool = False) -> int
     if not quiet:
         _echo()
     for layer in result.layers:
-        _echo(f"{layer.tier:8} {'cached' if layer.cached else 'built ':6} {layer.reference}")
+        _echo(
+            f"{layer.tier:8} {'cached' if layer.cached else 'built ':6} {layer.reference}"
+        )
     return 0
 
 
@@ -186,9 +194,7 @@ def run(
             reason = result.error or _first_failure(turns)
             _echo(f"[{done}/{total}] {result.id:<24} FAIL  {reason}")
 
-    report = execute(
-        config, records=records, builder=builder, on_progress=progress
-    )
+    report = execute(config, records=records, builder=builder, on_progress=progress)
 
     _echo()
     _echo(

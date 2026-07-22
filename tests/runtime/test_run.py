@@ -90,7 +90,9 @@ class TestDroidInvocation:
         assert "secret prompt" not in call.argv
 
     def test_autonomy_and_output_format(self) -> None:
-        call = DroidInvocation(autonomy="medium", output_format="stream-json").build("x")
+        call = DroidInvocation(autonomy="medium", output_format="stream-json").build(
+            "x"
+        )
         assert "--auto" in call.argv and "medium" in call.argv
         assert "--output-format" in call.argv and "stream-json" in call.argv
 
@@ -214,7 +216,9 @@ class TestPromptRunner:
         assert run.state_paths == (".local/share/opencode",)
 
     def test_harness_and_image_recorded(self) -> None:
-        run = runner(FakeSession()).run(harness="opencode", image="img:tag", prompts=["a"])
+        run = runner(FakeSession()).run(
+            harness="opencode", image="img:tag", prompts=["a"]
+        )
         assert run.harness == "opencode"
         assert run.image == "img:tag"
 

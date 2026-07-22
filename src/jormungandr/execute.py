@@ -168,8 +168,9 @@ def _container_spec(config: JormConfig, image: str) -> ContainerSpec:
     )
 
 
-def _write_result(directory: Path, record: PromptRecord, run: HarnessRun | None,
-                  error: str | None) -> None:
+def _write_result(
+    directory: Path, record: PromptRecord, run: HarnessRun | None, error: str | None
+) -> None:
     """Persist the record's outcome as JSON plus raw per-turn output.
 
     stdout and stderr go to their own files rather than into the JSON: harness
@@ -231,7 +232,10 @@ def _image_for(
     commit = resolve_commit(source.clone_url, source.ref)
     if not source.ref:
         log.info(
-            "%s: %s default branch resolved to %s", record.id, source.clone_url, commit[:12]
+            "%s: %s default branch resolved to %s",
+            record.id,
+            source.clone_url,
+            commit[:12],
         )
     layer = compose_workspace(
         parent=runtime_image,
@@ -296,7 +300,9 @@ def _run_one(
             system=record.system,
             timeout=timeout,
             container_spec=_container_spec(config, image),
-            collect_state_to=directory / "state" if config.output.collect_state else None,
+            collect_state_to=directory / "state"
+            if config.output.collect_state
+            else None,
             workdir=workdir_of(config),
         )
     except Exception as exc:  # noqa: BLE001 - one record failing must not end the run

@@ -48,7 +48,12 @@ def _apply_env_overrides(data: dict[str, Any], environ: dict[str, str]) -> None:
         previous = target.get(key)
         target[key] = value
         log.info(
-            "config: %s.%s = %s  (%s, overriding %r)", section, key, value, variable, previous
+            "config: %s.%s = %s  (%s, overriding %r)",
+            section,
+            key,
+            value,
+            variable,
+            previous,
         )
 
 

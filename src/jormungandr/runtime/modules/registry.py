@@ -32,7 +32,9 @@ class ModuleRegistry:
     def __init__(self) -> None:
         self._factories: dict[str, ModuleFactory] = {}
 
-    def register(self, name: str, factory: ModuleFactory, *, replace: bool = False) -> None:
+    def register(
+        self, name: str, factory: ModuleFactory, *, replace: bool = False
+    ) -> None:
         if not name:
             raise ModuleError("module name must be non-empty")
         if name in self._factories and not replace:
@@ -50,7 +52,9 @@ class ModuleRegistry:
             factory = self._factories[name]
         except KeyError:
             known = ", ".join(sorted(self._factories)) or "<none>"
-            raise ModuleError(f"unknown module {name!r}; known modules: {known}") from None
+            raise ModuleError(
+                f"unknown module {name!r}; known modules: {known}"
+            ) from None
         return factory(**config)
 
     def __contains__(self, name: object) -> bool:

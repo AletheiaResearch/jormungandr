@@ -8,6 +8,7 @@ from jormungandr.runtime.layers import (
     Cmd,
     Comment,
     Copy,
+    DockerfileError,
     Env,
     From,
     Label,
@@ -17,7 +18,6 @@ from jormungandr.runtime.layers import (
     Workdir,
     render_dockerfile,
 )
-from jormungandr.runtime.layers import DockerfileError
 
 
 class TestFrom:
@@ -42,8 +42,12 @@ class TestRun:
         assert rendered == "RUN apt-get update \\\n    && apt-get install -y git"
 
     def test_cache_mount(self) -> None:
-        rendered = Run("npm install -g codex", mounts=[CacheMount("/root/.npm")]).render()
-        assert rendered.startswith("RUN --mount=type=cache,target=/root/.npm,sharing=locked ")
+        rendered = Run(
+            "npm install -g codex", mounts=[CacheMount("/root/.npm")]
+        ).render()
+        assert rendered.startswith(
+            "RUN --mount=type=cache,target=/root/.npm,sharing=locked "
+        )
 
     def test_secret_mount(self) -> None:
         rendered = Run("use-token", mounts=[SecretMount(id="npm_token")]).render()

@@ -256,8 +256,13 @@ class DockerCli:
         # than an error.
         quoted = json.dumps(label)
         proc = self.run(
-            ["image", "inspect", "--format", f"{{{{index .Config.Labels {quoted}}}}}",
-             reference],
+            [
+                "image",
+                "inspect",
+                "--format",
+                f"{{{{index .Config.Labels {quoted}}}}}",
+                reference,
+            ],
             check=False,
             timeout=60,
         )

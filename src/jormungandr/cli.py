@@ -16,9 +16,9 @@ app = App(
 
 @app.command
 def check(
-    config: Annotated[Path, Parameter(help="Path to a jormungandr config file.")] = Path(
-        "jorm.yaml"
-    ),
+    config: Annotated[
+        Path, Parameter(help="Path to a jormungandr config file.")
+    ] = Path("jorm.yaml"),
 ) -> None:
     """Validate the config and prompts without building or running anything.
 
@@ -62,7 +62,9 @@ def build(
 def run(
     config: Path = Path("jorm.yaml"),
     *,
-    limit: Annotated[int | None, Parameter(help="Run only the first N records.")] = None,
+    limit: Annotated[
+        int | None, Parameter(help="Run only the first N records.")
+    ] = None,
     concurrency: Annotated[
         int | None, Parameter(help="Override run.concurrency.")
     ] = None,

@@ -175,12 +175,19 @@ class TestOpenCode:
     def test_version_is_pinned_by_default(self) -> None:
         # An unpinned @latest would make the digest lie: the same tag would
         # refer to different software depending on when it was built.
-        assert "@latest" not in compose(spec(modules=[{"name": "node"}, {"name": "opencode"}])).runtime.dockerfile
+        assert (
+            "@latest"
+            not in compose(
+                spec(modules=[{"name": "node"}, {"name": "opencode"}])
+            ).runtime.dockerfile
+        )
 
     def test_version_change_busts_the_cache(self) -> None:
         def digest(version: str) -> str:
             return compose(
-                spec(modules=[{"name": "node"}, {"name": "opencode", "version": version}])
+                spec(
+                    modules=[{"name": "node"}, {"name": "opencode", "version": version}]
+                )
             ).runtime.digest
 
         assert digest("1.18.4") != digest("1.18.3")
@@ -188,9 +195,12 @@ class TestOpenCode:
     def test_install_is_verified_at_build_time(self) -> None:
         # npm exits 0 even when no optional binary matched the platform, so
         # running the binary is the only proof the install is usable.
-        assert "opencode --version" in compose(
-            spec(modules=[{"name": "node"}, {"name": "opencode"}])
-        ).runtime.dockerfile
+        assert (
+            "opencode --version"
+            in compose(
+                spec(modules=[{"name": "node"}, {"name": "opencode"}])
+            ).runtime.dockerfile
+        )
 
     def test_uses_the_npm_cache_mount(self) -> None:
         result = compose(spec(modules=[{"name": "node"}, {"name": "opencode"}]))
@@ -215,7 +225,14 @@ class TestOpenCode:
 
     def test_newline_in_version_is_rejected(self) -> None:
         with pytest.raises(ModuleError, match="newline"):
-            compose(spec(modules=[{"name": "node"}, {"name": "opencode", "version": "1\nUSER root"}]))
+            compose(
+                spec(
+                    modules=[
+                        {"name": "node"},
+                        {"name": "opencode", "version": "1\nUSER root"},
+                    ]
+                )
+            )
 
 
 class TestBuiltinModules:
@@ -385,7 +402,9 @@ class TestInjectionResistance:
         # `langfuse>=3,<4` is a legitimate pin; quoting keeps it intact and
         # inert rather than banning it.
         result = compose(
-            spec(modules=[{"name": "python"}, {"name": "langfuse", "version": ">=3,<4"}])
+            spec(
+                modules=[{"name": "python"}, {"name": "langfuse", "version": ">=3,<4"}]
+            )
         )
         assert "'langfuse>=3,<4'" in result.runtime.dockerfile
 
@@ -419,7 +438,9 @@ class TestUserAccountHome:
         assert "ENV HOME=/home/agent" in out
 
     def test_home_follows_the_user(self) -> None:
-        out = compose(spec(modules=[{"name": "user", "user": "runner"}])).base.dockerfile
+        out = compose(
+            spec(modules=[{"name": "user", "user": "runner"}])
+        ).base.dockerfile
         assert "ENV HOME=/home/runner" in out
 
     def test_home_is_created_and_owned(self) -> None:
@@ -437,14 +458,18 @@ class TestDroid:
     """Factory's droid CLI, verified against a real container."""
 
     def test_installed_from_npm_pinned(self) -> None:
-        out = compose(spec(modules=[{"name": "node"}, {"name": "droid"}])).runtime.dockerfile
+        out = compose(
+            spec(modules=[{"name": "node"}, {"name": "droid"}])
+        ).runtime.dockerfile
         assert "npm install -g droid@0.176.0" in out
         assert "droid --version" in out
 
     def test_auto_update_disabled_by_default(self) -> None:
         # A harness that updates itself inside a container invalidates the
         # promise its digest makes: same digest, different software.
-        out = compose(spec(modules=[{"name": "node"}, {"name": "droid"}])).runtime.dockerfile
+        out = compose(
+            spec(modules=[{"name": "node"}, {"name": "droid"}])
+        ).runtime.dockerfile
         assert "FACTORY_DROID_AUTO_UPDATE_ENABLED=false" in out
 
     def test_auto_update_can_be_re_enabled(self) -> None:
@@ -457,7 +482,9 @@ class TestDroid:
         # Unlike droid's own default. This runtime runs agents against your own
         # provider endpoints, where the Factory cloud call is pure failure
         # surface — and its symptom is a bare "Exec failed".
-        out = compose(spec(modules=[{"name": "node"}, {"name": "droid"}])).runtime.dockerfile
+        out = compose(
+            spec(modules=[{"name": "node"}, {"name": "droid"}])
+        ).runtime.dockerfile
         assert "FACTORY_AIRGAP_ENABLED=true" in out
 
     def test_airgap_can_be_turned_off(self) -> None:

@@ -24,6 +24,8 @@ from jormungandr.runtime.layers import (
     Instruction,
     Run,
     User,
+)
+from jormungandr.runtime.layers import (
     Workdir as Workdir_,
 )
 from jormungandr.runtime.modules.base import BuildContext, ModuleError, Stage
@@ -590,7 +592,7 @@ class Langfuse:
             Comment("langfuse tracing over OTLP"),
             Run(
                 "pip install "
-                f'{_quoted_arg("langfuse" + self.version, what="langfuse pin")} '
+                f"{_quoted_arg('langfuse' + self.version, what='langfuse pin')} "
                 "'opentelemetry-sdk' 'opentelemetry-exporter-otlp'",
                 mounts=_PIP_CACHE,
             ),

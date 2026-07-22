@@ -25,14 +25,14 @@ from dataclasses import dataclass
 from jormungandr.runtime.identity import content_digest, image_labels, image_reference
 from jormungandr.runtime.layers import (
     Arg,
-    Run,
-    User,
-    Workdir,
     Comment,
     Copy,
     From,
     Instruction,
     Label,
+    Run,
+    User,
+    Workdir,
     render_dockerfile,
 )
 from jormungandr.runtime.modules.base import BuildContext, Module
@@ -150,7 +150,9 @@ def _check_context_files_are_used(
 def _matches_glob(name: str, pattern: str) -> bool:
     from fnmatch import fnmatch
 
-    return ("*" in pattern or "?" in pattern or "[" in pattern) and fnmatch(name, pattern)
+    return ("*" in pattern or "?" in pattern or "[" in pattern) and fnmatch(
+        name, pattern
+    )
 
 
 def _compose_layer(
@@ -199,7 +201,8 @@ def _compose_layer(
             # image and must be part of its identity.
             "labels": dict(spec.labels),
             "modules": [
-                {"name": m.name, "stage": m.stage, **dict(m.identity())} for m in modules
+                {"name": m.name, "stage": m.stage, **dict(m.identity())}
+                for m in modules
             ],
         },
     )

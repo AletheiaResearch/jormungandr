@@ -51,8 +51,18 @@ class FakeRunner:
         self.calls: list[dict] = []
         self.fail_ids = fail_ids or set()
 
-    def run(self, *, harness, image, prompts, timeout=None, container_spec=None,
-            collect_state_to=None, workdir=None, **kwargs):
+    def run(
+        self,
+        *,
+        harness,
+        image,
+        prompts,
+        timeout=None,
+        container_spec=None,
+        collect_state_to=None,
+        workdir=None,
+        **kwargs,
+    ):
         self.calls.append(
             {
                 "harness": harness,
@@ -103,7 +113,9 @@ class TestPreflight:
         # bad way to learn a variable is unset.
         builder = FakeBuilder()
         with pytest.raises(ExecutionError, match="OPENROUTER_API_KEY"):
-            execute(load(project), builder=builder, runner=FakeRunner(), available_env=set())
+            execute(
+                load(project), builder=builder, runner=FakeRunner(), available_env=set()
+            )
         assert builder.built == []
 
     def test_env_file_satisfies_the_requirement(self, project: Path) -> None:
@@ -113,7 +125,10 @@ class TestPreflight:
             CONFIG.replace("output:", f"run:\n  env_files: [{secrets}]\noutput:")
         )
         report = execute(
-            load(project), builder=FakeBuilder(), runner=FakeRunner(), available_env=set()
+            load(project),
+            builder=FakeBuilder(),
+            runner=FakeRunner(),
+            available_env=set(),
         )
         assert report.ok
 
@@ -312,9 +327,13 @@ class TestGitWorkspacesBecomeAnImage:
         from jormungandr.runtime.compose import compose_workspace
 
         other = compose_workspace(
-            parent="demo:runtime-abc", repository="demo",
-            clone_url="https://github.com/a/b", commit="e" * 40,
-            platform="linux/arm64", workdir="/workspace", user="agent",
+            parent="demo:runtime-abc",
+            repository="demo",
+            clone_url="https://github.com/a/b",
+            commit="e" * 40,
+            platform="linux/arm64",
+            workdir="/workspace",
+            user="agent",
         )
         assert other.digest != self.compose_for().digest
 
@@ -322,9 +341,13 @@ class TestGitWorkspacesBecomeAnImage:
         from jormungandr.runtime.compose import compose_workspace
 
         other = compose_workspace(
-            parent="demo:runtime-CHANGED", repository="demo",
-            clone_url="https://github.com/a/b", commit="d" * 40,
-            platform="linux/arm64", workdir="/workspace", user="agent",
+            parent="demo:runtime-CHANGED",
+            repository="demo",
+            clone_url="https://github.com/a/b",
+            commit="d" * 40,
+            platform="linux/arm64",
+            workdir="/workspace",
+            user="agent",
         )
         assert other.digest != self.compose_for().digest
 
@@ -339,7 +362,7 @@ class TestGitWorkspacesBecomeAnImage:
     def test_it_ends_as_the_unprivileged_user(self) -> None:
         layer = self.compose_for(user="runner")
         lines = [l for l in layer.dockerfile.splitlines() if l.startswith("USER")]
-        assert lines[0] == "USER root"   # cloning and chown need it
+        assert lines[0] == "USER root"  # cloning and chown need it
         assert lines[-1] == "USER runner"
 
     def test_git_is_installed_if_absent(self) -> None:
@@ -387,7 +410,9 @@ class TestGitWorkspacesBecomeAnImage:
         # the container runs from the workspace image, not the runtime one
         assert runner.calls[0]["image"].startswith("demo:workspace-")
 
-    def test_a_record_without_a_repo_uses_the_runtime_image(self, project: Path) -> None:
+    def test_a_record_without_a_repo_uses_the_runtime_image(
+        self, project: Path
+    ) -> None:
         runner = FakeRunner()
         execute(
             load(project),
@@ -499,7 +524,10 @@ class TestReviewRegressions:
         execute_module._image_for = explode
         try:
             report = execute(
-                load(project), builder=FakeBuilder(), runner=FakeRunner(), available_env=ENV
+                load(project),
+                builder=FakeBuilder(),
+                runner=FakeRunner(),
+                available_env=ENV,
             )
         finally:
             execute_module._image_for = original
@@ -520,7 +548,9 @@ class TestReviewRegressions:
         )
         assert not (second.results[0].directory / "turn-9.stdout.txt").exists()
 
-    def test_a_reserved_record_id_is_refused_before_running(self, project: Path) -> None:
+    def test_a_reserved_record_id_is_refused_before_running(
+        self, project: Path
+    ) -> None:
         # Otherwise it collides with the run report and fails after every
         # container has already run.
         runner = FakeRunner()
@@ -560,7 +590,9 @@ class TestReviewRegressions:
             )
         )
         runner = FakeRunner()
-        execute(load(project), builder=FakeBuilder(), runner=runner, available_env=set())
+        execute(
+            load(project), builder=FakeBuilder(), runner=runner, available_env=set()
+        )
         spec = runner.calls[0]["spec"]
         assert spec.env["LANGFUSE_HOST"] == "https://h"
         assert spec.env_files and spec.env_files[0].endswith("secrets.env")
@@ -699,9 +731,7 @@ class TestRecordsWithoutIds:
         )
         assert [r.id for r in report.results] == ["prompt-0000", "mine"]
 
-    def test_the_derived_id_reaches_the_per_record_summary(
-        self, project: Path
-    ) -> None:
+    def test_the_derived_id_reaches_the_per_record_summary(self, project: Path) -> None:
         # _write_result serializes record.id, so deriving an id somewhere the
         # record itself never sees would leave `"id": null` on disk while the
         # directory was named correctly.
@@ -712,7 +742,5 @@ class TestRecordsWithoutIds:
             runner=FakeRunner(),
             available_env=ENV,
         )
-        summary = json.loads(
-            (report.results[0].directory / "result.json").read_text()
-        )
+        summary = json.loads((report.results[0].directory / "result.json").read_text())
         assert summary["id"] == "prompt-0000"

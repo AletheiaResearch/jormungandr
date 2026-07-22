@@ -83,7 +83,9 @@ class TestCreateArgs:
         assert f"{MANAGED_LABEL}=true" in args
         assert any(a.startswith(f"{SESSION_LABEL}=") for a in args)
 
-    def test_resource_limits_are_applied_by_default(self, runtime: ContainerRuntime) -> None:
+    def test_resource_limits_are_applied_by_default(
+        self, runtime: ContainerRuntime
+    ) -> None:
         runtime.create(ContainerSpec(image="img"))
         args = args_of(runtime)
         assert "--cpus" in args and "--memory" in args and "--pids-limit" in args
@@ -117,7 +119,8 @@ class TestCreateArgs:
 
     def test_limits_can_be_relaxed(self, runtime: ContainerRuntime) -> None:
         spec = ContainerSpec(
-            image="img", limits=ResourceLimits(cpus=None, memory=None, pids=None, nofile=None)
+            image="img",
+            limits=ResourceLimits(cpus=None, memory=None, pids=None, nofile=None),
         )
         runtime.create(spec)
         assert "--cpus" not in args_of(runtime)
@@ -184,7 +187,9 @@ class TestReaping:
         host = socket.gethostname()
         docker = FakeDocker(
             containers=[
-                container_row(cid="a" * 64, name="jormungandr-dead", owner=f"{DEAD_PID}@{host}")
+                container_row(
+                    cid="a" * 64, name="jormungandr-dead", owner=f"{DEAD_PID}@{host}"
+                )
             ]
         )
         runtime = ContainerRuntime(docker=docker, install_handlers=False)
@@ -233,7 +238,9 @@ class TestReaping:
         host = socket.gethostname()
         docker = FakeDocker(
             containers=[
-                container_row(cid="b" * 64, name="other-live", owner=f"{os.getpid()}@{host}")
+                container_row(
+                    cid="b" * 64, name="other-live", owner=f"{os.getpid()}@{host}"
+                )
             ]
         )
         runtime = ContainerRuntime(docker=docker, install_handlers=False)
@@ -241,7 +248,9 @@ class TestReaping:
 
     def test_does_not_reap_detached_runs(self) -> None:
         docker = FakeDocker(
-            containers=[container_row(cid="c" * 64, name="detached", owner=DETACHED_OWNER)]
+            containers=[
+                container_row(cid="c" * 64, name="detached", owner=DETACHED_OWNER)
+            ]
         )
         runtime = ContainerRuntime(docker=docker, install_handlers=False)
         assert runtime.reap_orphans() == []
@@ -260,7 +269,11 @@ class TestReaping:
     def test_foreign_host_owner_is_left_alone(self) -> None:
         # A pid from another machine says nothing about a pid here.
         docker = FakeDocker(
-            containers=[container_row(cid="e" * 64, name="remote", owner=f"{DEAD_PID}@elsewhere")]
+            containers=[
+                container_row(
+                    cid="e" * 64, name="remote", owner=f"{DEAD_PID}@elsewhere"
+                )
+            ]
         )
         runtime = ContainerRuntime(docker=docker, install_handlers=False)
         assert runtime.reap_orphans() == []

@@ -131,7 +131,10 @@ class TestGitPythonApp:
 
     def test_clones_at_a_pinned_ref(self) -> None:
         out = render(self.hermes())
-        assert "git clone --filter=blob:none https://github.com/NousResearch/hermes-agent.git" in out
+        assert (
+            "git clone --filter=blob:none https://github.com/NousResearch/hermes-agent.git"
+            in out
+        )
         assert "checkout v1.0.0" in out
 
     def test_builds_an_isolated_venv(self) -> None:
@@ -192,16 +195,19 @@ class TestHarness:
         assert "RUN prog" not in out
 
     def test_requires_defaults_to_the_installer(self) -> None:
-        assert Harness(name="x", installer=NpmGlobal("p", "1"), binary="b").requires == (
-            "node",
-        )
+        assert Harness(
+            name="x", installer=NpmGlobal("p", "1"), binary="b"
+        ).requires == ("node",)
         assert Harness(
             name="x", installer=GitPythonApp("r", ref="v1", binary="b"), binary="b"
         ).requires == ("python",)
 
     def test_requires_can_be_overridden(self) -> None:
         harness = Harness(
-            name="x", installer=NpmGlobal("p", "1"), binary="b", requires=("node", "apt")
+            name="x",
+            installer=NpmGlobal("p", "1"),
+            binary="b",
+            requires=("node", "apt"),
         )
         assert harness.requires == ("node", "apt")
 
@@ -211,7 +217,10 @@ class TestHarness:
             ShellInstall("https://x/y"),
             GitPythonApp("r", ref="v1", binary="b"),
         ):
-            assert Harness(name="x", installer=installer, binary="b").stage == Stage.HARNESS
+            assert (
+                Harness(name="x", installer=installer, binary="b").stage
+                == Stage.HARNESS
+            )
 
     def test_installer_kind_is_in_the_identity(self) -> None:
         harness = Harness(name="x", installer=NpmGlobal("p", "1"), binary="b")

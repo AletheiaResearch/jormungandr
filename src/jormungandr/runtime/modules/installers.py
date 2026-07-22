@@ -125,7 +125,9 @@ class ShellInstall:
         self.shell = _safe_token(shell, what="installer shell")
         self.sha256 = _safe_token(sha256, what="installer sha256") if sha256 else None
         if self.sha256 is not None and len(self.sha256) != 64:
-            raise ModuleError(f"sha256 must be 64 hex characters, got {len(self.sha256)}")
+            raise ModuleError(
+                f"sha256 must be 64 hex characters, got {len(self.sha256)}"
+            )
         self.env = {str(k): str(v) for k, v in (env or {}).items()}
 
     def instructions(self, context: BuildContext) -> Sequence[Instruction]:

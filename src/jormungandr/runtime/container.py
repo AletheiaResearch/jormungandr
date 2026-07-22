@@ -326,7 +326,9 @@ class ContainerRuntime:
         """
         return self.docker.list_containers(label=f"{SESSION_LABEL}")
 
-    def reap_orphans(self, *, owner: str | None = None, all_owners: bool = False) -> list[str]:
+    def reap_orphans(
+        self, *, owner: str | None = None, all_owners: bool = False
+    ) -> list[str]:
         """Remove managed containers left behind by dead processes.
 
         This — not the signal handler — is the real guarantee, because a

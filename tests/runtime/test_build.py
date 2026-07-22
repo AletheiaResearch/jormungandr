@@ -62,16 +62,22 @@ class TestWriteContext:
         assert "!Dockerfile" in (context / ".dockerignore").read_text()
 
     def test_writes_module_files_with_modes(self, builder: ImageBuilder) -> None:
-        layer = compose(simple_spec(modules=[{"name": "script", "content": "echo x"}])).runtime
+        layer = compose(
+            simple_spec(modules=[{"name": "script", "content": "echo x"}])
+        ).runtime
         context = builder.write_context(layer)
         script = context / "script.sh"
         assert script.read_text() == "echo x\n"
         assert script.stat().st_mode & 0o777 == 0o755
 
-    def test_dockerignore_allows_declared_module_files(self, builder: ImageBuilder) -> None:
+    def test_dockerignore_allows_declared_module_files(
+        self, builder: ImageBuilder
+    ) -> None:
         # A static `*` + `!Dockerfile` silently drops every baked-in script and
         # only fails later, as a COPY that cannot find its source.
-        layer = compose(simple_spec(modules=[{"name": "script", "content": "echo x"}])).runtime
+        layer = compose(
+            simple_spec(modules=[{"name": "script", "content": "echo x"}])
+        ).runtime
         context = builder.write_context(layer)
         assert "!script.sh" in (context / ".dockerignore").read_text()
 
@@ -130,13 +136,17 @@ class TestBuild:
 
     def test_skips_when_both_tiers_exist(self, tmp_path: Path) -> None:
         composed = compose(simple_spec())
-        docker = FakeDocker(existing={composed.base.reference, composed.runtime.reference})
+        docker = FakeDocker(
+            existing={composed.base.reference, composed.runtime.reference}
+        )
         builder = ImageBuilder(state_dir=tmp_path, docker=docker)
         result = builder.build(simple_spec())
         assert result.cached
         assert docker.builds == []
 
-    def test_cached_base_is_reused_while_the_runtime_rebuilds(self, tmp_path: Path) -> None:
+    def test_cached_base_is_reused_while_the_runtime_rebuilds(
+        self, tmp_path: Path
+    ) -> None:
         # The payoff of tiering: an existing base is not rebuilt.
         composed = compose(simple_spec())
         docker = FakeDocker(existing={composed.base.reference})
@@ -149,7 +159,9 @@ class TestBuild:
 
     def test_force_rebuilds_and_disables_cache(self, tmp_path: Path) -> None:
         composed = compose(simple_spec())
-        docker = FakeDocker(existing={composed.base.reference, composed.runtime.reference})
+        docker = FakeDocker(
+            existing={composed.base.reference, composed.runtime.reference}
+        )
         builder = ImageBuilder(state_dir=tmp_path, docker=docker)
         result = builder.build(simple_spec(), force=True)
         assert result.built
