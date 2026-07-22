@@ -14,10 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     name: Tox
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v9
         with:
           version: "latest"
           enable-cache: true
@@ -36,15 +36,18 @@ jobs:
       # here. They are opt-in via `tox -e docker`.
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: AletheiaResearch/jormungandr
 
+      # Same action, report_type: test_results — the separate
+      # codecov/test-results-action is deprecated in favour of this.
       - name: Upload test results to Codecov
         # Test results are most useful precisely when the run failed.
         if: ${{ !cancelled() }}
-        uses: codecov/test-results-action@v1
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: AletheiaResearch/jormungandr
+          report_type: test_results
