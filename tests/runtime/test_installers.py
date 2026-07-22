@@ -256,7 +256,6 @@ class TestNonNpmHarnessComposesEndToEnd:
         registry = ModuleRegistry()
         from jormungandr.runtime.modules.builtin import (
             AptPackages,
-            NodeToolchain,
             PythonToolchain,
         )
 

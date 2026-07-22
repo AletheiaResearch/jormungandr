@@ -9,14 +9,13 @@ a stale image silently reused.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
-from typing import Callable
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
 from jormungandr.runtime.modules.base import Module, ModuleError
 
 __all__ = [
-    "ModuleRegistry",
     "REGISTRY",
+    "ModuleRegistry",
     "load_entry_point_modules",
     "resolve_order",
 ]

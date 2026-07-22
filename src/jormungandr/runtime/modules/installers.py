@@ -37,6 +37,9 @@ __all__ = [
 _NPM_CACHE = (CacheMount("/root/.npm"),)
 _UV_CACHE = (CacheMount("/root/.cache/uv"),)
 
+_SHA256_HEX_LENGTH = 64
+"""A sha256 digest is 32 bytes, so 64 hex characters."""
+
 
 @runtime_checkable
 class Installer(Protocol):
@@ -83,7 +86,7 @@ class NpmGlobal:
     def spec(self) -> str:
         return f"{self.package}@{self.version}"
 
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:  # noqa: ARG002 - `context` is the Installer protocol's signature; npm needs no baked files
         from jormungandr.runtime.modules.builtin import _quoted_arg
 
         return [
@@ -124,13 +127,14 @@ class ShellInstall:
         self.url = _safe_token(url, what="installer url")
         self.shell = _safe_token(shell, what="installer shell")
         self.sha256 = _safe_token(sha256, what="installer sha256") if sha256 else None
-        if self.sha256 is not None and len(self.sha256) != 64:
+        if self.sha256 is not None and len(self.sha256) != _SHA256_HEX_LENGTH:
             raise ModuleError(
-                f"sha256 must be 64 hex characters, got {len(self.sha256)}"
+                f"sha256 must be {_SHA256_HEX_LENGTH} hex characters, "
+                f"got {len(self.sha256)}"
             )
         self.env = {str(k): str(v) for k, v in (env or {}).items()}
 
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:  # noqa: ARG002 - `context` is the Installer protocol's signature; the script is fetched at build time, not baked
         prefix = "".join(f"{k}={v} " for k, v in sorted(self.env.items()))
         commands = [f"curl -fsSL {self.url} -o /tmp/install.sh"]
         if self.sha256:

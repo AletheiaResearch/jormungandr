@@ -25,7 +25,7 @@ work for one harness.
 from __future__ import annotations
 
 import re
-from typing import Annotated, Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -119,7 +119,11 @@ class ProviderSpec(BaseModel):
     @property
     def env_var(self) -> str:
         match = ENV_REFERENCE.match(self.api_key)
-        assert match is not None  # guaranteed by the validator
+        if match is None:
+            # The validator guarantees this; an assert would vanish under -O.
+            # The value is deliberately not interpolated — this class exists to
+            # keep a leaked key out of error text.
+            raise ValueError("api_key is not an environment reference")
         return match.group(1)
 
     def resolve(self, alias: str) -> str:

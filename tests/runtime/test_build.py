@@ -217,7 +217,6 @@ class TestTerminateGroup:
     def test_kills_grandchildren_not_just_the_direct_child(self) -> None:
         # The failure mode this exists to prevent: SWE-bench signals only the
         # top-level pid, so a shell's children outlive the "timeout".
-        import os
         import time
 
         proc = subprocess.Popen(

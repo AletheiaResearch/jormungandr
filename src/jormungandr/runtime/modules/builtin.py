@@ -33,12 +33,12 @@ from jormungandr.runtime.modules.installers import Installer, NpmGlobal
 from jormungandr.runtime.modules.registry import REGISTRY
 
 __all__ = [
+    "AptPackages",
     "Droid",
     "Harness",
-    "OpenCode",
-    "AptPackages",
     "Langfuse",
     "NodeToolchain",
+    "OpenCode",
     "PythonToolchain",
     "Script",
     "UserAccount",
@@ -121,7 +121,7 @@ class AptPackages:
         self.name = name
         self.packages = cleaned
 
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:  # noqa: ARG002 - `context` is the Module protocol's signature; this module bakes no files
         return [
             Comment(f"apt packages: {', '.join(self.packages)}"),
             Run(
@@ -161,7 +161,7 @@ class NodeToolchain:
         self.version = _safe_token(version, what="node version")
         self.preinstalled = bool(preinstalled)
 
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:  # noqa: ARG002 - `context` is the Module protocol's signature; this module bakes no files
         if self.preinstalled:
             return [Comment(f"node {self.version} provided by the base image")]
         return [
@@ -198,7 +198,7 @@ class PythonToolchain:
         self.name = name
         self.venv = _safe_token(venv, what="venv path")
 
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:  # noqa: ARG002 - `context` is the Module protocol's signature; this module bakes no files
         return [
             Comment("python venv + uv"),
             # Self-contained: slim base images carry no python3, and a module
@@ -476,7 +476,7 @@ class Droid(Harness):
 
     CONFIG_PATH = ".factory/settings.json"
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - nine keyword-only knobs, each a droid CLI setting; a settings object here would only rename the same nine
         self,
         *,
         version: str = DEFAULT_VERSION,
@@ -587,7 +587,7 @@ class Langfuse:
         _quoted_arg(self.version, what="langfuse version")
         self.requires = tuple(requires)
 
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:  # noqa: ARG002 - `context` is the Module protocol's signature; this module bakes no files
         return [
             Comment("langfuse tracing over OTLP"),
             Run(
@@ -689,7 +689,7 @@ class UserAccount:
         self.uid = _safe_uid(uid)
         self.home = _safe_token(home or f"/home/{self.user}", what="home directory")
 
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:  # noqa: ARG002 - `context` is the Module protocol's signature; this module bakes no files
         return [
             Comment(f"user {self.user} (uid {self.uid}, HOME={self.home})"),
             # useradd is shadow-utils and absent on alpine, which provides
@@ -743,7 +743,7 @@ class Workdir:
         self.user = _safe_token(user, what="workdir user")
         self.requires = tuple(requires)
 
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:  # noqa: ARG002 - `context` is the Module protocol's signature; this module bakes no files
         return [
             Comment(f"workdir {self.path} owned by {self.user}"),
             Run([f"mkdir -p {self.path}", f"chown -R {self.user} {self.path}"]),

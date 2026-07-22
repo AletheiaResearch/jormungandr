@@ -160,7 +160,7 @@ def resolve_prompts(config: JormConfig) -> tuple[PromptRecord, ...]:
 
 def compile_image_spec(config: JormConfig) -> Any:
     """Build the ImageSpec, including the harness with its translated config."""
-    from jormungandr.runtime.modules import REGISTRY, builtin  # noqa: F401
+    from jormungandr.runtime.modules import REGISTRY, builtin
     from jormungandr.runtime.spec import ImageSpec
 
     harness_cls = {"droid": builtin.Droid, "opencode": builtin.OpenCode}[

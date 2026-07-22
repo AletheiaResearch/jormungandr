@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import contextlib
 import shutil
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from jormungandr.runtime.container import ContainerRuntime, ContainerSession
@@ -93,7 +93,7 @@ class PromptRunner:
         self.runtime = runtime or ContainerRuntime()
         self.default_timeout = default_timeout
 
-    def run(
+    def run(  # noqa: PLR0913 - fourteen keyword-only arguments; splitting this is a refactor nobody has asked for, so the debt is recorded rather than paid
         self,
         *,
         harness: str,

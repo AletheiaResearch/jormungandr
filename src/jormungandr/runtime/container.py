@@ -39,7 +39,7 @@ from jormungandr.runtime.docker import CommandResult, DockerCli
 from jormungandr.runtime.identity import LABEL_NAMESPACE
 from jormungandr.runtime.spec import ContainerSpec
 
-__all__ = ["ContainerSession", "ContainerRuntime", "SESSION_LABEL", "MANAGED_LABEL"]
+__all__ = ["MANAGED_LABEL", "SESSION_LABEL", "ContainerRuntime", "ContainerSession"]
 
 SESSION_LABEL = f"{LABEL_NAMESPACE}.session"
 MANAGED_LABEL = f"{LABEL_NAMESPACE}.managed"
@@ -245,7 +245,7 @@ class ContainerRuntime:
         with self._lock:
             self._live.pop(session.container_id, None)
 
-    def _create_args(
+    def _create_args(  # noqa: PLR0912 - one branch per optional `docker create` flag; splitting it would only scatter the flag list
         self, spec: ContainerSpec, *, session_id: str, name: str, owner: str
     ) -> list[str]:
         args = ["--name", name, "--label", f"{MANAGED_LABEL}=true"]
@@ -401,7 +401,7 @@ class ContainerRuntime:
 
         previous: dict[int, object] = {}
 
-        def handle(signum: int, frame: FrameType | None) -> None:
+        def handle(signum: int, _frame: FrameType | None) -> None:
             shutdown_if_alive()
             # Restore and re-raise so the caller's own handling, and the shell's
             # view of why we died, both stay correct.
@@ -463,13 +463,11 @@ def _owner_is_dead(owner: str) -> bool:
     if not owner or owner == DETACHED_OWNER:
         return False
     pid_text, _, host = owner.partition("@")
-    if host != _hostname():
-        return False
     try:
         pid = int(pid_text)
     except ValueError:
         return False
-    if pid == os.getpid():
+    if host != _hostname() or pid == os.getpid():
         return False
     try:
         os.kill(pid, 0)

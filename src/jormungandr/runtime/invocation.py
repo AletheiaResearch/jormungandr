@@ -20,16 +20,16 @@ they are not equivalent:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 __all__ = [
+    "INVOCATIONS",
     "DroidInvocation",
     "HarnessInvocation",
     "Invocation",
     "OpenCodeInvocation",
-    "INVOCATIONS",
     "invocation_for",
 ]
 
@@ -92,7 +92,11 @@ class OpenCodeInvocation:
     system_via = "agents_md"
 
     def build(
-        self, prompt: str, *, model: str | None = None, system: str | None = None
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        system: str | None = None,  # noqa: ARG002 - required by the HarnessInvocation protocol; opencode has no system-prompt flag, so system_via="agents_md" carries it instead
     ) -> Invocation:
         argv: list[str] = ["opencode", "run"]
         if model:

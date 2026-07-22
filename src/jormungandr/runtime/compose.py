@@ -43,11 +43,11 @@ __all__ = [
     "BASE_TIER",
     "RUNTIME_TIER",
     "WORKSPACE_TIER",
-    "compose_workspace",
     "ComposeError",
     "ComposedImage",
     "ComposedLayer",
     "compose",
+    "compose_workspace",
 ]
 
 BASE_TIER = "base"
@@ -265,7 +265,7 @@ def compose(
     return ComposedImage(spec=spec, layers=(base, runtime))
 
 
-def compose_workspace(
+def compose_workspace(  # noqa: PLR0913 - nine tier inputs, each part of the image digest; bundling them into an object would hide what the hash covers
     *,
     parent: str,
     repository: str,
@@ -293,7 +293,7 @@ def compose_workspace(
     ``commit`` must be a resolved revision, not a branch: the digest is only
     honest if the content it names is fixed.
     """
-    staging = "/tmp/jormungandr-clone"
+    staging = "/tmp/jormungandr-clone"  # noqa: S108 - a path inside the image being built, not on the host
     content = f"{staging}/{subdirectory}" if subdirectory else staging
     destination = f"{workdir}/{clone_as}" if clone_as else workdir
 

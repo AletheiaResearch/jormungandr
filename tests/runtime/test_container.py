@@ -137,10 +137,12 @@ class TestSessionLifecycle:
         assert cid in runtime.docker.removed  # type: ignore[attr-defined]
 
     def test_session_removes_on_exception(self, runtime: ContainerRuntime) -> None:
-        with pytest.raises(RuntimeError):
-            with runtime.session(ContainerSpec(image="img")) as session:
-                cid = session.container_id
-                raise RuntimeError("boom")
+        with (
+            pytest.raises(RuntimeError),
+            runtime.session(ContainerSpec(image="img")) as session,
+        ):
+            cid = session.container_id
+            raise RuntimeError("boom")
         assert cid in runtime.docker.removed  # type: ignore[attr-defined]
 
     def test_remove_is_idempotent(self, runtime: ContainerRuntime) -> None:
@@ -295,7 +297,8 @@ class TestShutdownRobustness:
         # second Ctrl-C unwinds the loop; the atexit retry then finds nothing.
         docker = FakeDocker()
         runtime = ContainerRuntime(docker=docker, install_handlers=False)
-        sessions = [runtime.create(ContainerSpec(image="img")) for _ in range(3)]
+        for _ in range(3):
+            runtime.create(ContainerSpec(image="img"))
 
         calls = {"n": 0}
         real_remove = docker.remove_container

@@ -21,14 +21,13 @@ import shutil
 import subprocess
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from jormungandr.config.models import JormConfig
 from jormungandr.config.prompts import PromptRecord
-from jormungandr.runtime.invocation import invocation_for
 from jormungandr.runtime.run import HarnessRun, PromptRunner
 from jormungandr.runtime.spec import ContainerSpec, ResourceLimits
 
@@ -111,7 +110,7 @@ def resolve_commit(clone_url: str, ref: str | None) -> str:
         return ref
     target = ref or "HEAD"
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S603 - argv is fixed; `--` and GitSource.clone_url's validator stop clone_url being read as an option
             # `--` is load-bearing: both operands come from prompts.jsonl, and
             # without it a clone_url of `--upload-pack=<cmd>` is parsed as an
             # option rather than a repository — which runs <cmd> on this host.
@@ -275,7 +274,7 @@ def _run_one(
         # A record with a repository runs from its own workspace image, built
         # on the runtime one, so the checkout is cached across retries.
         image = _image_for(config, image, record, builder, directory, platform)
-    except Exception as exc:  # noqa: BLE001 - one record must not end the run
+    except Exception as exc:  # one record must not end the run
         # Not just ExecutionError: resolving a ref or building the workspace
         # image can raise OSError, a subprocess timeout, or a BuildError, and
         # losing 199 completed records because record 200 hit a full disk is
@@ -305,7 +304,7 @@ def _run_one(
             else None,
             workdir=workdir_of(config),
         )
-    except Exception as exc:  # noqa: BLE001 - one record failing must not end the run
+    except Exception as exc:  # one record failing must not end the run
         log.exception("record %s failed to run", record.id)
         _write_result(directory, record, None, str(exc))
         return RecordResult(record.id, False, None, directory, str(exc))

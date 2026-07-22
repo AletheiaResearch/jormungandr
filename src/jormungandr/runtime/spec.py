@@ -15,7 +15,7 @@ per-run value cannot accidentally end up in the image hash.
 from __future__ import annotations
 
 import platform as _platform
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 

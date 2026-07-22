@@ -1,5 +1,6 @@
 """CLI declarations. Stdlib + cyclopts imports only — command bodies
-import their implementations lazily so --help stays fast."""
+import their implementations lazily so --help stays fast.
+"""
 
 from __future__ import annotations
 

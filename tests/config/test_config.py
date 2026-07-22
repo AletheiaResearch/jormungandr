@@ -8,7 +8,6 @@ from pydantic import ValidationError
 
 from jormungandr.config import (
     ConfigError,
-    JormConfig,
     ProviderSpec,
     compile_image_spec,
     load_config,
@@ -125,7 +124,7 @@ class TestJormConfig:
                 "  droid:\n    airgap: true\n  opencode:\n    agent: build\n",
             )
         )
-        with pytest.raises(ConfigError, match="harness.opencode is set"):
+        with pytest.raises(ConfigError, match=r"harness\.opencode is set"):
             load_config(project / "jorm.yaml", apply_env=False)
 
     def test_unknown_top_level_key_rejected(self, project: Path) -> None:
@@ -429,7 +428,7 @@ class TestCompileToImageSpec:
         (project / "jorm.yaml").write_text(
             BASE_CONFIG.replace("    airgap: true", "    airgapp: true")
         )
-        with pytest.raises(Exception):
+        with pytest.raises(TypeError, match="airgapp"):
             self.compiled(project)
 
 
@@ -698,12 +697,12 @@ class TestReviewRegressions:
 
     def test_a_literal_credential_is_not_echoed_in_the_message(self) -> None:
         # Reporting a leaked key must not print the key.
-        secret = "sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789"
+        leaked_key = "sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789"
         with pytest.raises(ValidationError) as excinfo:
-            ProviderSpec(base_url="https://h/v1", api_key=secret, models={"a": "b"})
+            ProviderSpec(base_url="https://h/v1", api_key=leaked_key, models={"a": "b"})
         message = str(excinfo.value)
         # pydantic echoes the input separately; our own text must not add it.
-        assert "abcdefghijklmnop" not in message.split("input_value")[0]
+        assert "abcdefghijklmnop" not in message.split("input_value", maxsplit=1)[0]
 
     def test_opencode_limits_are_emitted_without_context_window(self) -> None:
         # The schema requires both keys, so a partial limit is invalid — but

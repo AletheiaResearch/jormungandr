@@ -9,7 +9,7 @@ from importlib import import_module
 from typing import Any
 
 
-class MissingExtra(RuntimeError):
+class MissingExtraError(RuntimeError):
     def __init__(self, module: str, extra: str) -> None:
         super().__init__(
             f"needs {module!r} — install with: pip install 'jormungandr[{extra}]'"
@@ -20,7 +20,7 @@ def require(module: str, extra: str) -> Any:
     try:
         return import_module(module)
     except ImportError as exc:
-        raise MissingExtra(module, extra) from exc
+        raise MissingExtraError(module, extra) from exc
 
 
 def configure_logging(*, verbose: bool = False) -> None:
@@ -42,7 +42,7 @@ def install_error_handler() -> None:
     if os.environ.get("JORMUNGANDR_TRACEBACK"):
         return
 
-    always = (MissingExtra, FileNotFoundError, PermissionError, ValueError)
+    always = (MissingExtraError, FileNotFoundError, PermissionError, ValueError)
 
     def _expected() -> tuple[type[BaseException], ...]:
         """Resolve the runtime error types only once something has failed.
@@ -63,7 +63,7 @@ def install_error_handler() -> None:
         ):
             try:
                 extra.append(getattr(import_module(module), name))
-            except Exception:  # noqa: BLE001 - reporting must not itself fail
+            except Exception:  # noqa: S112 - reporting must not itself fail
                 continue
         return always + tuple(extra)
 

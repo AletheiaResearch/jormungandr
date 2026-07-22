@@ -307,11 +307,11 @@ class TestPromptRunnerAgainstRealContainers:
 
     def test_prompt_never_appears_in_argv(self, runner, stub_image, docker) -> None:
         # If the prompt were on argv it would show up in `docker inspect`.
-        secret = "prompt-that-must-not-leak-9f3a"
-        runner.run(harness="droid", image=stub_image, prompts=[secret])
+        canary = "prompt-that-must-not-leak-9f3a"
+        runner.run(harness="droid", image=stub_image, prompts=[canary])
         for container in docker.list_containers():
             blob = json.dumps(container)
-            assert secret not in blob
+            assert canary not in blob
 
     def test_multi_turn_shares_session_state(self, runner, stub_image) -> None:
         # Later turns must see what earlier ones wrote — that is the whole
@@ -792,7 +792,7 @@ class TestWorkspaceImageTier:
             # /etc of the *image*, not the host — alpine's, and the host's
             # /etc content is not what a container /etc looks like.
             assert "alpine-release" in got or got.strip() != ""
-        except Exception:
+        except Exception:  # noqa: S110 - a build failure is one of the two safe outcomes this asserts
             # A repo whose subdirectory is a symlink may simply fail to build;
             # either outcome is safe, which is the point.
             pass

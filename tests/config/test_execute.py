@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from jormungandr.config import load_config
 from jormungandr.config.prompts import PromptRecord
@@ -279,7 +280,7 @@ class TestOverrides:
     def test_no_per_record_model_override_exists(self) -> None:
         # Model selection is baked into the image, so varying it per record
         # would mean an image per record. Compare models by running twice.
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError, match="model"):
             PromptRecord(id="w", prompt="x", overrides={"model": "other/model"})
 
 
@@ -361,7 +362,9 @@ class TestGitWorkspacesBecomeAnImage:
 
     def test_it_ends_as_the_unprivileged_user(self) -> None:
         layer = self.compose_for(user="runner")
-        lines = [l for l in layer.dockerfile.splitlines() if l.startswith("USER")]
+        lines = [
+            line for line in layer.dockerfile.splitlines() if line.startswith("USER")
+        ]
         assert lines[0] == "USER root"  # cloning and chown need it
         assert lines[-1] == "USER runner"
 
@@ -434,7 +437,7 @@ class TestRefResolution:
     def test_an_unresolvable_repo_is_a_clear_error(self) -> None:
         from jormungandr.execute import ExecutionError, resolve_commit
 
-        with pytest.raises(ExecutionError, match="could not resolve|timed out"):
+        with pytest.raises(ExecutionError, match=r"could not resolve|timed out"):
             resolve_commit("https://github.invalid/nope/nope", "main")
 
     def test_a_clone_url_cannot_become_a_git_option(self, tmp_path: Path) -> None:

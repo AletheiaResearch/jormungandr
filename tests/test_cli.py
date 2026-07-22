@@ -45,6 +45,7 @@ def cli(*args: str, cwd: Path | None = None, env: dict | None = None):
         timeout=180,
         cwd=str(cwd) if cwd else None,
         env={**os.environ, **(env or {})},
+        check=False,  # every caller asserts on returncode itself
     )
 
 
@@ -70,7 +71,11 @@ class TestHelp:
             "and ('runtime' in m or m.endswith('execute'))))"
         )
         out = subprocess.run(
-            [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
         ).stdout
         assert out.strip() == "[]", f"eagerly imported: {out.strip()}"
 
@@ -84,7 +89,11 @@ class TestHelp:
             "raise ExecutionError('boom')"
         )
         result = subprocess.run(
-            [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
         )
         assert result.returncode == 1
         assert "error: boom" in result.stderr
@@ -110,6 +119,7 @@ class TestCheck:
             timeout=180,
             cwd=str(project),
             env=env,
+            check=False,
         )
         assert result.returncode == 1
         assert "STUB_API_KEY" in result.stderr
@@ -128,6 +138,7 @@ class TestCheck:
             timeout=180,
             cwd=str(project),
             env=env,
+            check=False,
         )
         assert result.returncode == 0, result.stderr
 
