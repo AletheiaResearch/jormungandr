@@ -62,8 +62,9 @@ passed, 38 deselected on 3.14.5**. Ruff's `target-version = "py314"` produces
 byte-identical output to `py313` on this tree — 260 findings either way — so
 the bump costs nothing in lint churn.
 
-This also retires the `pyarrow` cp315 concern noted earlier; it becomes live
-again at 3.15. `pyarrow` remains declared and imported nowhere.
+This also retires the `pyarrow` cp315 concern noted earlier. `pyarrow` was
+declared as a dependency and imported nowhere, so it has since been removed
+outright — see the last step of the sequence.
 
 ### What is deliberately not adopted
 
@@ -389,6 +390,14 @@ defect before fixing it.
 | 13 | `build: run the gates under tox` | `tox.ini`, `test`/`lint`/`type` dependency groups, `pytest-cov` |
 | 14 | `ci: run tox on push and pull request` | `.github/workflows/check.yml` with both Codecov uploads; makes `[gh.python]` live |
 | 15 | `docs: add the coverage badge and record the tox commands` | README badge, CLAUDE.md commands |
+| 16 | `build!: drop the unused pyarrow dependency` | declared, imported nowhere, and the only thing blocking 3.15 |
+
+Step 12b, `fix: annotate what mypy --strict requires`, is not in the table
+above because this sequence did not anticipate it. The cost table records 33
+mypy errors but no step ever cleared them, so step 14 would have landed red.
+Two of the 33 were real defects rather than annotation debt — a double
+`proc.poll()` and a handler dict typed `object`, which is why the signal
+defect type-checked at all.
 
 ### Task 12 is smaller than it looked
 
@@ -516,9 +525,5 @@ They are recorded so they are not lost.
 - **`uv check` runs `ty`, not mypy.** A contributor typing the obvious command
   gets a different type checker with different answers. Step 17 names the real
   commands in CLAUDE.md; that is the mitigation.
-- **`pyarrow`** is declared as a dependency and imported nowhere. It constrains
-  the Python floor (no cp315 wheels) for no benefit. Removing it is its own
-  concern, and wants a check of whether the trace-reading boundary described in
-  `docs/notes.md` is expected to need it.
-- **Python 3.15.** Blocked on `pyarrow` cp315 wheels for as long as `pyarrow`
-  stays declared.
+- **Python 3.15.** No longer blocked on `pyarrow`, which has been removed. Not
+  attempted here: 3.15 is still in beta, and the floor only just moved.

@@ -7,7 +7,7 @@ authors = [
     { name = "Nejc Drobnic", email = "nejc@nejc.dev" }
 ]
 requires-python = ">=3.14"
-dependencies = ["cyclopts>=3", "pydantic>=2", "pyyaml>=6", "pyarrow>=18"]
+dependencies = ["cyclopts>=3", "pydantic>=2", "pyyaml>=6"]
 
 [project.scripts]
 jormungandr = "jormungandr.cli:main"
