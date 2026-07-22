@@ -17,7 +17,7 @@ requires = ["uv_build>=0.11.23,<0.12.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.15", "mypy>=2", "types-PyYAML"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -26,3 +26,40 @@ markers = [
 ]
 # Docker-backed tests are opt-in: `uv run pytest -m docker`.
 addopts = "-m 'not docker'"
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B", "A", "C4", "SIM",
+          "RET", "ARG", "PTH", "ERA", "TID", "RUF", "S", "PL", "D"]
+ignore = [
+  "E501",                                          # the formatter owns line length
+  "W191", "E111", "E114", "E117", "D206", "D300",  # conflict with `ruff format`
+  "PLC0415",                                       # deferred imports are deliberate
+  "S607",                                          # partial paths are deliberate
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S108", "S603", "S607", "D", "ARG", "PLR2004"]
+# D1xx (missing docstrings) applies to the public surface only. runtime/ is the
+# internal machinery, where a docstring per render()/identity()/one-line
+# property restates the protocol above it. Docstring *style* rules still apply.
+"src/jormungandr/runtime/**" = ["D1"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.pylint]
+max-args = 8
+
+[tool.mypy]
+files = ["src"]
+python_version = "3.14"
+strict = true
+show_error_codes = true
+plugins = ["pydantic.mypy"]
+local_partial_types = true   # stated explicitly: mypy 2.0 made these defaults,
+strict_bytes = true          # so a downgrade cannot silently relax them
