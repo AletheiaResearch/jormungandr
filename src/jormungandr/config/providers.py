@@ -118,6 +118,12 @@ class ProviderSpec(BaseModel):
 
     @property
     def env_var(self) -> str:
+        """Name the environment variable the api_key refers to.
+
+        The key is stored as a reference, never a literal, so this is the only
+        thing a config can say about it — the value is resolved inside the
+        container, from ``run.env_files``.
+        """
         match = ENV_REFERENCE.match(self.api_key)
         if match is None:
             # The validator guarantees this; an assert would vanish under -O.
@@ -127,6 +133,12 @@ class ProviderSpec(BaseModel):
         return match.group(1)
 
     def resolve(self, alias: str) -> str:
+        """Turn a declared alias into the provider's own model id.
+
+        Aliases exist so a config names a model once and every record refers to
+        it by a short name; an unknown one is an error naming what was declared,
+        because the alternative is a provider-side failure mid-run.
+        """
         try:
             return self.models[alias]
         except KeyError:

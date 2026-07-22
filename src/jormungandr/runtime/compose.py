@@ -277,7 +277,7 @@ def compose_workspace(  # noqa: PLR0913 - nine tier inputs, each part of the ima
     subdirectory: str | None = None,
     clone_as: str | None = None,
 ) -> ComposedLayer:
-    """A third tier holding a repository checkout, built on the runtime image.
+    """Compose a third tier holding a repository checkout, on the runtime image.
 
     This is SWE-bench's *instance* tier, and it is here for the same reason:
     the checkout is the most expensive per-task step and the one most worth

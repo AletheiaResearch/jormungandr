@@ -121,7 +121,7 @@ class Module(Protocol):
         ...
 
     def identity(self) -> Mapping[str, object]:
-        """Configuration that affects the built image.
+        """Report the configuration that affects the built image.
 
         Folded into the image hash. Anything that changes the resulting image
         must appear here, or a stale image will be silently reused.

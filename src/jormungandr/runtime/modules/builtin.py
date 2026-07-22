@@ -275,7 +275,7 @@ class Harness:
             raise ModuleError(f"harness {name!r} does not accept a config document")
 
     def config_document(self) -> str | None:
-        """The harness's config file content, or None.
+        """Render the harness's config file content, or None if it needs none.
 
         Serialized canonically (`sort_keys`) for the same reason
         `identity.canonical_json` exists: an unstable byte representation means

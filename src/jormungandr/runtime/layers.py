@@ -56,7 +56,7 @@ class Instruction(Protocol):
 
 
 def _check_single_line(value: str, *, what: str) -> str:
-    """Reject embedded newlines.
+    r"""Reject embedded newlines.
 
     Every instruction here is line-oriented, so a newline in a value does not
     escape a string — it ends the instruction and starts a new one. A package

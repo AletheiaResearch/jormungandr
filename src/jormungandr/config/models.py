@@ -51,7 +51,7 @@ class HarnessSpec(BaseModel):
 
     @model_validator(mode="after")
     def _reject_foreign_harness_blocks(self) -> HarnessSpec:
-        """A block for a harness you are not running is an error.
+        """Reject a settings block for a harness you are not running.
 
         Silently ignoring it means a stale `codex:` block left behind after
         switching to `droid` looks configured and does nothing.
@@ -66,10 +66,18 @@ class HarnessSpec(BaseModel):
 
     @property
     def settings(self) -> dict[str, Any]:
+        """Return the settings block belonging to the selected harness.
+
+        Copied, not aliased: the model is frozen, and handing out the live dict
+        would let a caller mutate configuration that is meant to be fixed once
+        loaded.
+        """
         return dict(getattr(self, self.name) or {})
 
 
 class PromptsSpec(BaseModel):
+    """Where the prompt records come from, and how many of them to run."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     file: Path
@@ -77,6 +85,8 @@ class PromptsSpec(BaseModel):
 
 
 class RunSpec(BaseModel):
+    """How the containers are run: concurrency, limits, network and env."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     concurrency: int = Field(default=1, ge=1)
@@ -90,6 +100,8 @@ class RunSpec(BaseModel):
 
 
 class OutputSpec(BaseModel):
+    """Where a run's artifacts land, and whether harness state is collected."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     dir: Path = Path("./runs")
@@ -151,4 +163,11 @@ class JormConfig(BaseModel):
         return env_names(self.providers)
 
     def missing_env(self, available: set[str]) -> set[str]:
+        """Name the required variables that ``available`` does not supply.
+
+        Reported before any container starts. OpenCode substitutes an unset
+        variable with the empty string rather than failing, so a missing key
+        would otherwise surface as an authentication error from the provider,
+        after the image was built and the container was running.
+        """
         return self.required_env - available

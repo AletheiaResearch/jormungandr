@@ -10,13 +10,25 @@ from typing import Any
 
 
 class MissingExtraError(RuntimeError):
+    """An optional dependency is needed and is not installed."""
+
     def __init__(self, module: str, extra: str) -> None:
+        """Build the message naming the extra that would supply ``module``.
+
+        The install command goes in the message because a bare "no module named
+        x" leaves the user to work out which extra provides it.
+        """
         super().__init__(
             f"needs {module!r} — install with: pip install 'jormungandr[{extra}]'"
         )
 
 
 def require(module: str, extra: str) -> Any:
+    """Import ``module``, or say which extra would provide it.
+
+    Turns an ImportError, which names a module the user never asked for, into
+    one naming the extra they can actually install.
+    """
     try:
         return import_module(module)
     except ImportError as exc:
@@ -39,6 +51,15 @@ def configure_logging(*, verbose: bool = False) -> None:
 
 
 def install_error_handler() -> None:
+    """Report expected failures as one line instead of a traceback.
+
+    A missing env var or an unreachable daemon is a condition the user can act
+    on; printing forty frames of internal call stack for it buries the one line
+    that matters. Genuine internal bugs still get the default hook.
+
+    Set ``JORMUNGANDR_TRACEBACK`` to disable this entirely, which is what you
+    want when the failure *is* the bug you are chasing.
+    """
     if os.environ.get("JORMUNGANDR_TRACEBACK"):
         return
 

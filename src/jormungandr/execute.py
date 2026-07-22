@@ -51,6 +51,14 @@ class ExecutionError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class RecordResult:
+    """What became of one prompt record.
+
+    ``error`` is set when the record failed before or around the harness —
+    a workspace that would not build, a container that would not start. A
+    harness that ran and exited non-zero leaves ``error`` unset and ``run``
+    populated, because that is a result, not a malfunction.
+    """
+
     id: str
     ok: bool
     run: HarnessRun | None
@@ -59,30 +67,40 @@ class RecordResult:
 
     @property
     def turns(self) -> tuple:
+        """Return the harness's turns, or empty if it never ran."""
         return self.run.turns if self.run else ()
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionReport:
+    """The outcome of a whole run: one image, and a result per record."""
+
     image: str
     results: tuple[RecordResult, ...]
     output_dir: Path
 
     @property
     def succeeded(self) -> tuple[RecordResult, ...]:
+        """Return the records that completed without error."""
         return tuple(r for r in self.results if r.ok)
 
     @property
     def failed(self) -> tuple[RecordResult, ...]:
+        """Return the records that did not."""
         return tuple(r for r in self.results if not r.ok)
 
     @property
     def ok(self) -> bool:
+        """Report whether every record succeeded.
+
+        This is what the CLI's exit status is derived from, so a single failed
+        record makes the whole run non-zero.
+        """
         return not self.failed
 
 
 def user_of(config: JormConfig) -> str:
-    """The account the agent runs as, per the ``user`` module."""
+    """Name the account the agent runs as, per the ``user`` module."""
     for declaration in config.image.modules:
         if declaration.get("name") == "user":
             return str(declaration.get("user") or DEFAULT_USER)
@@ -214,7 +232,7 @@ def _image_for(
     directory: Path,
     platform: str,
 ) -> str:
-    """The image this record runs from.
+    """Choose the image this record runs from.
 
     A record with a repository gets its own workspace tier built on the runtime
     image, so the checkout is cached: a retried run reuses it instead of

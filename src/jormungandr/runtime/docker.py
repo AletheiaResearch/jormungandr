@@ -245,7 +245,7 @@ class DockerCli:
         return payload[0]
 
     def image_digest(self, reference: str) -> str:
-        """The image's content-addressable ID.
+        """Return the image's content-addressable ID.
 
         Downstream operations reference this rather than the tag: a mutable tag
         can be reassigned by a concurrent build or an external ``docker tag``,

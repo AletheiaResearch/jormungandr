@@ -454,7 +454,7 @@ def _parse_labels(raw: str) -> dict[str, str]:
 
 
 def _owner_is_dead(owner: str) -> bool:
-    """Is the process that created a container gone?
+    """Report whether the process that created a container is gone.
 
     Only decidable for containers created on this host: a pid from another
     machine says nothing about a pid here, so those are treated as alive

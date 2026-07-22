@@ -1,5 +1,7 @@
-"""CLI declarations. Stdlib + cyclopts imports only — command bodies
-import their implementations lazily so --help stays fast.
+"""CLI declarations.
+
+Stdlib and cyclopts imports only. Command bodies import their implementations
+lazily, so ``--help`` does not pay for the compose and container machinery.
 """
 
 from __future__ import annotations
@@ -136,6 +138,11 @@ def _launcher(
 
 
 def main() -> None:
+    """Run the CLI.
+
+    Installs the error handler before dispatching, so a failure surfaces as one
+    line naming the cause rather than a traceback the user cannot act on.
+    """
     from jormungandr.cli_helpers import install_error_handler
 
     install_error_handler()

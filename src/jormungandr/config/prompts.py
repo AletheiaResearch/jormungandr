@@ -202,6 +202,13 @@ class Overrides(BaseModel):
 
 
 class PromptRecord(BaseModel):
+    """One unit of work: a prompt, its follow-ups, and where it runs.
+
+    A superset of Teich's record format, so an existing prompts file loads
+    unchanged. Everything beyond ``prompt``/``follow_up_prompts``/``system``
+    is this project's own and is optional.
+    """
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     # --- Teich's format -----------------------------------------------------
@@ -344,6 +351,13 @@ class PromptRecord(BaseModel):
         return (self.prompt, *self.follow_up_prompts)
 
     def with_id(self, derived: str) -> PromptRecord:
+        """Attach ``derived`` as the id, unless one was supplied.
+
+        An id is optional in the file format — Teich records have none — but
+        becomes a directory name once the record runs. Deriving it from
+        position keeps a hand-written id authoritative while giving every
+        record somewhere to write.
+        """
         return self if self.id else self.model_copy(update={"id": derived})
 
 
