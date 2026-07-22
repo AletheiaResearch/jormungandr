@@ -29,6 +29,12 @@ Claims about behaviour need evidence, not reasoning.
 
 - Run the thing. `uv run pytest` for the fast suite, `uv run pytest -m docker`
   for the ones that need a daemon, `uv run pytest -m ""` for everything.
+- `tox` runs every gate — tests on 3.14, `ruff check`, `ruff format --check`
+  and `mypy` — and is what CI runs, so a green `tox` locally means a green CI.
+  `tox -e docker` for the daemon-backed tests; they are deliberately outside
+  the default env list so a bare `tox` never needs Docker.
+- Do **not** use `uv check` to type check. It runs `ty`, not mypy, and gives
+  different answers. The gate is `uv run mypy`, or `tox -e type`.
 - A test that would still pass with the implementation removed proves nothing.
   Several in this repo were rewritten after mutation testing showed exactly
   that.

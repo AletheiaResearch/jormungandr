@@ -1,3 +1,5 @@
+[![codecov](https://codecov.io/github/AletheiaResearch/jormungandr/graph/badge.svg)](https://codecov.io/github/AletheiaResearch/jormungandr)
+
 # jormungandr
 
 ![jörmungandr](banner.png)
