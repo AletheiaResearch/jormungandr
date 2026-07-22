@@ -341,6 +341,17 @@ def execute(
     if not prompts:
         raise ExecutionError("no prompt records to run")
 
+    # `id` is optional on a record, and load_prompts is the only thing that
+    # ever fills it in — so `records=` supplied by a caller arrives with ids of
+    # None. `output_dir / record.id` then raised TypeError inside a worker and
+    # future.result() re-raised it: every record still ran and paid for its
+    # container, but the run report was never written and the caller got a
+    # TypeError instead of a result. Derived with load_prompts' own scheme, so
+    # a record run this way lands where the file-driven run would have put it.
+    prompts = tuple(
+        record.with_id(f"prompt-{index:04d}") for index, record in enumerate(prompts)
+    )
+
     # Checked before any container starts: a record named "report.json" would
     # otherwise collide with the run report and fail after every record had
     # already run, discarding the whole run's work.

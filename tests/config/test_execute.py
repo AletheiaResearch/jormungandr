@@ -628,3 +628,91 @@ class TestFinalPatches:
             "r:runtime-bbb",
             "r:base-aaa",
         ]
+
+
+class TestRecordsWithoutIds:
+    """`id` is optional on PromptRecord, and `execute(records=...)` skips
+    `load_prompts`, which is the only thing that ever fills it in."""
+
+    def test_a_record_without_an_id_still_runs(self, project: Path) -> None:
+        runner = FakeRunner()
+        report = execute(
+            load(project),
+            records=[PromptRecord(prompt="x")],
+            builder=FakeBuilder(),
+            runner=runner,
+            available_env=ENV,
+        )
+        assert report.ok
+        assert runner.calls[0]["prompts"] == ["x"]
+        assert report.results[0].id == "prompt-0000"
+        assert report.results[0].directory.name == "prompt-0000"
+
+    def test_one_record_without_an_id_does_not_lose_the_report(
+        self, project: Path
+    ) -> None:
+        # The failure this guards: `output_dir / record.id` raised TypeError in
+        # a worker and `future.result()` re-raised it. Every container still
+        # ran and still billed, but the run-level report.json was never
+        # written and the caller got a TypeError instead of a result.
+        runner = FakeRunner()
+        report = execute(
+            load(project),
+            records=[
+                PromptRecord(id="keeper", prompt="kept"),
+                PromptRecord(prompt="x"),
+            ],
+            builder=FakeBuilder(),
+            runner=runner,
+            available_env=ENV,
+        )
+        assert [r.id for r in report.results] == ["keeper", "prompt-0001"]
+        assert report.ok
+        payload = json.loads((report.output_dir / "report.json").read_text())
+        assert sorted(payload["succeeded"]) == ["keeper", "prompt-0001"]
+
+    def test_ids_derived_here_match_the_ones_load_prompts_derives(
+        self, project: Path
+    ) -> None:
+        # Same scheme as config/prompts.py, so a record run through
+        # `execute(records=...)` lands in the directory the file-driven run
+        # would have used.
+        report = execute(
+            load(project),
+            records=[PromptRecord(prompt="one"), PromptRecord(prompt="two")],
+            builder=FakeBuilder(),
+            runner=FakeRunner(),
+            available_env=ENV,
+        )
+        assert [r.id for r in report.results] == ["prompt-0000", "prompt-0001"]
+
+    def test_a_supplied_id_is_never_overwritten(self, project: Path) -> None:
+        report = execute(
+            load(project),
+            records=[
+                PromptRecord(prompt="one"),
+                PromptRecord(id="mine", prompt="two"),
+            ],
+            builder=FakeBuilder(),
+            runner=FakeRunner(),
+            available_env=ENV,
+        )
+        assert [r.id for r in report.results] == ["prompt-0000", "mine"]
+
+    def test_the_derived_id_reaches_the_per_record_summary(
+        self, project: Path
+    ) -> None:
+        # _write_result serializes record.id, so deriving an id somewhere the
+        # record itself never sees would leave `"id": null` on disk while the
+        # directory was named correctly.
+        report = execute(
+            load(project),
+            records=[PromptRecord(prompt="x")],
+            builder=FakeBuilder(),
+            runner=FakeRunner(),
+            available_env=ENV,
+        )
+        summary = json.loads(
+            (report.results[0].directory / "result.json").read_text()
+        )
+        assert summary["id"] == "prompt-0000"
