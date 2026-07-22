@@ -1,5 +1,7 @@
 # jormungandr
 
+![jörmungandr](banner.png)
+
 Compose Docker images and run containers for agent harnesses.
 
 This is the runtime layer: it builds images that can run agent CLIs and manages
