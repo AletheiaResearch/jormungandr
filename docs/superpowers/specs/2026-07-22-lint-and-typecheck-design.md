@@ -119,6 +119,9 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S108", "S603", "S607", "D", "ARG", "PLR2004"]
+# D1xx (missing docstrings) applies to the public surface only. Docstring
+# *style* rules still apply here — see "Docstrings: public surface only".
+"src/jormungandr/runtime/**" = ["D1"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "pep257"
@@ -267,6 +270,35 @@ Codecov requires `AletheiaResearch/jormungandr` to be onboarded with a
 
 The README gains the coverage badge, as the reference repo has on line 1.
 
+### Docstrings: public surface only
+
+Selecting `D` wholesale demanded 164 new docstrings. Reading what they would
+actually say killed that: **75 of the 164 were on symbols where prose adds
+nothing** — 15 `render()` methods on single-operation instruction dataclasses,
+12 `identity()` implementations of a Protocol whose contract
+(`modules/base.py:123-129`) is already stated in full, 22 one-line derived
+properties (`ok`, `failed`, `reference`, `digest`), 17 one-line delegations to
+`DockerCli`, 5 registry dunders, 4 singletons.
+
+Writing those produces precisely the `"""Return the config."""` filler this
+spec names as the failure mode, and it would dilute the genuinely good
+why-focused prose that is the repo's actual asset.
+
+So `D1xx` is scoped to the public surface — everything except
+`src/jormungandr/runtime/**`, which is the internal machinery: image building,
+container lifecycle, the module registry, Dockerfile instruction rendering.
+What remains is the CLI, the config models, and `execute.py`, which is what
+`__all__` exports and what a library caller touches.
+
+**Docstring style rules are not narrowed.** Only the `D1` prefix is ignored, so
+`D2xx`/`D3xx`/`D4xx` still hold every docstring in `runtime/` to the house
+standard — 6 of the 11 style findings are in `runtime/` and still get fixed.
+
+Measured effect: **164 missing docstrings → 23**, across 8 files
+(`execute.py` 6, `config/models.py` 5, `cli_helpers.py` 4, `config/providers.py`
+2, `config/prompts.py` 2, `__init__.py` 2, `cli.py` 1, `__main__.py` 1). Total
+`ruff check` goes from 249 to **108**.
+
 ### Why each ignore earns its line
 
 - **`PLC0415`** (119 findings) — `cli.py` defers every subcommand import, and
@@ -298,12 +330,29 @@ With the configuration above:
 
 | | Findings |
 | --- | --- |
-| `ruff check` total | **260** (`src` 237, `tests` 23) |
-| — of which, missing docstrings (`D1xx`) | 164 |
-| — of which, docstring style (`D2xx`/`D4xx`) | 11 |
-| — of which, substantive | 85 |
+| `ruff check` total | **108** |
+| — of which, missing docstrings (`D1xx`) | 23 |
+| — of which, docstring style (`D2xx`/`D3xx`/`D4xx`) | 11 |
+| — of which, substantive | 74 (29 auto-fixable, 45 hand edits) |
 | `ruff format` | 25 of 39 files, ~556 changed lines |
 | `mypy --strict src` (with `types-PyYAML`) | **33** in 10 files |
+| `mypy --strict src tests` | 289 in 19 files |
+
+Two earlier drafts of this table were wrong, both in the same direction —
+counting work the configuration already removes:
+
+- **260 / 85 substantive** was measured with ruff's default `max-args = 5`
+  while this spec prescribes `max-args = 8`, counting 11 `PLR0913` findings the
+  config silences. Corrected: 249 / 74.
+- **164 docstrings** predates scoping `D1xx` to the public surface.
+  Corrected: 23, and the total drops 249 → 108.
+
+The figures above are what `ruff check` prints with the configuration as
+specified. Both corrections came from running the config rather than reasoning
+about it, which is the point.
+
+The `src tests` figure requires `--with pytest` on the `uvx` invocation;
+without it mypy cannot resolve `import pytest` and the count inflates to 320.
 
 `types-PyYAML` is the only stub package needed; `pydantic` and `cyclopts` both
 ship `py.typed`.
@@ -332,16 +381,14 @@ defect before fixing it.
 | 5 | `fix: import the names the annotations reference` | the three `F821` |
 | 6 | `refactor(runtime): widen tuple annotations to tuple[str, ...]` | kills 5 `src` + 18 `tests` mypy errors and 14 `# type: ignore` |
 | 7 | `style: format with ruff` | 25 files, nothing else in the commit. Run `ruff check --select I --fix` *before* `ruff format`; that order converges, the reverse needs a second format pass. |
-| 8 | `fix: clear the ruff findings that are not docstrings` | `F401`, `I001`, `RUF022`, `RUF100`, `PLW1510`, `B017`, `RUF043`, `F841`, `E741`, and the remainder of the 85 |
-| 9 | `docs: document the config API` | part of the 164 docstrings |
-| 10 | `docs: document the runtime API` | " |
-| 11 | `docs: document the cli and commands API` | " |
-| 12 | `fix(runtime): drop the Field() call that only sets a default` | `spec.py:117` only — see below |
-| 13 | `build!: require Python 3.14` | `requires-python`, `.python-version`, relock. Breaking, hence `!` |
-| 14 | `build: add ruff and mypy configuration` | lands green |
-| 15 | `build: run the gates under tox` | `tox.ini`, `test`/`lint`/`type` dependency groups, `pytest-cov` |
-| 16 | `ci: run tox on push and pull request` | `.github/workflows/check.yml` with both Codecov uploads; makes `[gh.python]` live |
-| 17 | `docs: add the coverage badge and record the tox commands` | README badge, CLAUDE.md commands |
+| 8 | `fix: clear the substantive ruff findings` | the 74 — 29 auto-fixed, 45 by hand |
+| 9 | `docs: document the public API` | the 23 docstrings + the 11 style fixes |
+| 10 | `fix(runtime): drop the Field() call that only sets a default` | `spec.py:117` only — see below |
+| 11 | `build!: require Python 3.14` | `requires-python`, `.python-version`, relock. Breaking, hence `!` |
+| 12 | `build: add ruff and mypy configuration` | lands green |
+| 13 | `build: run the gates under tox` | `tox.ini`, `test`/`lint`/`type` dependency groups, `pytest-cov` |
+| 14 | `ci: run tox on push and pull request` | `.github/workflows/check.yml` with both Codecov uploads; makes `[gh.python]` live |
+| 15 | `docs: add the coverage badge and record the tox commands` | README badge, CLAUDE.md commands |
 
 ### Task 12 is smaller than it looked
 
@@ -374,14 +421,34 @@ and the gate is green the moment it exists. The alternative — land the config
 first and let the tree stay red for a dozen commits — is faster to write and
 worse to bisect.
 
-### Risk on steps 9–11
+### The house style the 23 docstrings are held to
 
-The 164 docstrings are the bulk of this work and the part most likely to go
-wrong. 103 are `D102` on methods. The failure mode is `"""Return the
-config."""` filler that dilutes the genuinely good why-focused prose already in
-`execute.py` and `docs/notes.md`. Each docstring must say why the thing exists
-or what it guarantees, not restate its signature. Where a method truly has
-nothing to add, raise it rather than padding it.
+Extracted from `execute.py` and `docs/notes.md`, which are where this repo's
+prose is at its best:
+
+1. **The summary line is one imperative sentence naming the job**, not the
+   return value. Across all of `src` exactly two docstrings begin with
+   "Return", and both are Protocol contracts where naming the return *is* the
+   job.
+2. **A body is warranted when there is a plausible alternative the reader would
+   otherwise assume**, and the body's job is to kill it. The shape is always
+   *chosen thing* → **rather than** → *obvious thing* → **because** → *the
+   concrete failure*.
+3. **Name the failure mode in units, not adjectives.** "a run of two hundred
+   records against one repository otherwise makes two hundred identical network
+   calls" — never "this is important for correctness". Same standard CLAUDE.md
+   sets for commit messages.
+4. **State the boundary**: what the thing deliberately does *not* do, and where
+   that responsibility goes instead.
+5. **Never restate the signature.** No `Args:`, `Returns:`, `Raises:` sections,
+   ever. A grep for them across `src` returns zero matches today; types live in
+   annotations, and pydantic field semantics live in the field's own attribute
+   docstring.
+
+Note that rule 1 has a cost: 6 of the 7 `D401` findings are noun-phrase
+summaries, which is the house voice, not sloppiness. Selecting `D` commits the
+repo to imperative summaries. Step 9's commit message should say so, or a later
+reader will "restore" them.
 
 ## Verification
 
@@ -411,6 +478,31 @@ docker ps -a --filter 'label=dev.jormungandr.session' -q | wc -l
 ```
 
 ## Deferred
+
+Three further defects were found and reproduced while verifying the three
+above. None is in scope here — each is its own concern with its own failure
+mode, and CLAUDE.md is explicit about not widening a change to sweep them in.
+They are recorded so they are not lost.
+
+- **`ContainerRuntime` never uninstalls its signal handlers.** Measured: five
+  runtimes constructed and garbage-collected leave five `atexit` callbacks and
+  a five-deep handler chain, of which four levels do nothing — their weakrefs
+  are dead. `_install_handlers` has no inverse, the class is not a context
+  manager, and merely *constructing* one permanently repoints the interpreter's
+  SIGINT and SIGTERM. Bounded today (the CLI builds one per run) but a real
+  library-use defect. It also leaks into the pytest process via
+  `tests/runtime/test_container.py:315`.
+- **An inherited `SIG_IGN` is overridden.** Launched under `nohup` or a
+  supervisor that ignores SIGTERM, a SIGTERM now tears down every container,
+  then correctly honours the inherited `SIG_IGN` and does *not* kill the
+  process — which keeps running with its containers silently gone. POSIX
+  convention is not to handle a signal inherited as `SIG_IGN`. One-line guard.
+- **Duplicate record ids are unchecked in `execute(records=...)`.** Two records
+  sharing an id silently share one output directory, and the `shutil.rmtree` at
+  `execute.py:261` means one clobbers the other. `load_prompts` guards this
+  (`config/prompts.py:339-343`); `execute()` does not. Pre-existing, and step 3
+  does not introduce it — but step 3's derived `prompt-NNNN` ids can now
+  collide with an explicitly supplied one.
 
 - **mypy over `tests/`.** Strict on `src` is 33 errors; adding `tests/` is
   +256. Doing both in one change guarantees blanket `# type: ignore`. Worth
