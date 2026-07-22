@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core.core_schema import ValidationInfo
 
 __all__ = [
     "GitSource",
@@ -158,8 +159,8 @@ class GitSource(BaseModel):
 
     @field_validator("subdirectory", "clone_as")
     @classmethod
-    def _validate_relative(cls, value: str | None, info) -> str | None:
-        return _safe_relative(value, field=info.field_name)
+    def _validate_relative(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return _safe_relative(value, field=str(info.field_name))
 
     @property
     def has_history(self) -> bool:

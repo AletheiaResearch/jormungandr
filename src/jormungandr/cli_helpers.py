@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 from importlib import import_module
+from types import TracebackType
 from typing import Any
 
 
@@ -88,7 +89,11 @@ def install_error_handler() -> None:
                 continue
         return always + tuple(extra)
 
-    def hook(exc_type, exc, tb):
+    def hook(
+        exc_type: type[BaseException],
+        exc: BaseException,
+        tb: TracebackType | None,
+    ) -> None:
         if issubclass(exc_type, KeyboardInterrupt):
             raise SystemExit(130)
         if issubclass(exc_type, BrokenPipeError):

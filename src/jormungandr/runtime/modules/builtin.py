@@ -30,7 +30,7 @@ from jormungandr.runtime.layers import (
 )
 from jormungandr.runtime.modules.base import BuildContext, ModuleError, Stage
 from jormungandr.runtime.modules.installers import Installer, NpmGlobal
-from jormungandr.runtime.modules.registry import REGISTRY
+from jormungandr.runtime.modules.registry import REGISTRY, ModuleRegistry
 
 __all__ = [
     "AptPackages",
@@ -90,8 +90,13 @@ def _quoted_arg(value: object, *, what: str) -> str:
 
 def _safe_uid(value: object) -> int:
     try:
-        uid = int(value)
-    except (TypeError, ValueError):
+        # `int()` is itself the validation here — ModuleDeclaration does not
+        # coerce, so YAML hands this whatever was written, and both the
+        # TypeError and the ValueError below are load-bearing. Typing the
+        # parameter narrowly instead would reject a float uid that int()
+        # accepts today.
+        uid: int = int(value)  # type: ignore[call-overload]
+    except TypeError, ValueError:
         raise ModuleError(f"uid must be an integer, got {value!r}") from None
     if not 0 <= uid <= 2**31 - 1:
         raise ModuleError(f"uid out of range: {uid}")
@@ -552,7 +557,7 @@ class Droid(Harness):
                     entry["maxOutputTokens"] = provider.max_output_tokens  # type: ignore[attr-defined]
                 custom.append(entry)
         selected = index_of[model_ref]
-        display = custom[selected]["displayName"]
+        display = str(custom[selected]["displayName"])
         return {
             "customModels": custom,
             "sessionDefaultSettings": {"model": f"custom:{display}-{selected}"},
@@ -755,7 +760,7 @@ class Workdir:
         return {"path": self.path, "user": self.user}
 
 
-def register_builtins(registry=REGISTRY) -> None:
+def register_builtins(registry: ModuleRegistry = REGISTRY) -> None:
     """Register the built-in modules. Idempotent."""
     factories = {
         "apt": AptPackages,

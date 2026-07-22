@@ -14,6 +14,7 @@ had never been linted or introspected by anything.
 
 from __future__ import annotations
 
+import ast
 import importlib
 import importlib.util
 import inspect
@@ -65,12 +66,47 @@ def _functions(module: ModuleType) -> list[tuple[str, object]]:
     return found
 
 
+def _namespace(module: ModuleType) -> dict[str, Any]:
+    """The module's globals, plus whatever it imports under ``TYPE_CHECKING``.
+
+    A ``if TYPE_CHECKING:`` import is deliberate — it is how a module annotates
+    against something it must not import at runtime, which is the whole reason
+    ``commands/jobs.py`` can keep ``--help`` from paying for the docker stack.
+    Those names are genuinely absent from the module at runtime, so resolving
+    them has to be done explicitly.
+
+    Executing the block rather than trusting it also makes this stricter: a
+    ``TYPE_CHECKING`` import naming something that does not exist is invisible
+    to the interpreter forever, and is exactly the class of mistake this file
+    was written to catch.
+    """
+    namespace = dict(vars(module))
+    source = inspect.getsource(module)
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        guarded = (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+            isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+        )
+        if not guarded:
+            continue
+        for statement in node.body:
+            if isinstance(statement, ast.Import | ast.ImportFrom):
+                exec(  # noqa: S102 - the repo's own import statements, not input
+                    compile(ast.Module([statement], []), "<type-checking>", "exec"),
+                    namespace,
+                )
+    return namespace
+
+
 def _unresolved(module: ModuleType) -> list[str]:
     """Names this module's annotations reference but its namespace does not hold."""
+    namespace = _namespace(module)
     problems: list[str] = []
     for qualname, function in _functions(module):
         try:
-            typing.get_type_hints(function)
+            typing.get_type_hints(function, globalns=namespace)
         except NameError as exc:
             problems.append(f"{module.__name__}.{qualname}: {exc}")
     return problems

@@ -163,9 +163,10 @@ def compile_image_spec(config: JormConfig) -> Any:
     from jormungandr.runtime.modules import REGISTRY, builtin
     from jormungandr.runtime.spec import ImageSpec
 
-    harness_cls = {"droid": builtin.Droid, "opencode": builtin.OpenCode}[
-        config.harness.name
-    ]
+    harness_cls: type[builtin.Droid] | type[builtin.OpenCode] = {
+        "droid": builtin.Droid,
+        "opencode": builtin.OpenCode,
+    }[config.harness.name]
     translated = harness_cls.translate_providers(config.providers, config.harness.model)
 
     declaration: dict[str, Any] = {

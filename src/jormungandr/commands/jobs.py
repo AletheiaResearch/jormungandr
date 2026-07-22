@@ -9,7 +9,16 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Type-only, so the lazy imports in the command bodies stay lazy — this
+    # module exists to keep `--help` from paying for the runtime stack.
+    from collections.abc import Sequence
+
+    from jormungandr.config.models import JormConfig
+    from jormungandr.execute import RecordResult
+    from jormungandr.runtime.run import TurnResult
 
 __all__ = ["build", "check", "prune", "reap", "render", "run"]
 
@@ -18,7 +27,7 @@ def _echo(message: str = "", *, err: bool = False) -> None:
     print(message, file=sys.stderr if err else sys.stdout, flush=True)
 
 
-def _load(config_path: Path, **overrides: Any):
+def _load(config_path: Path, **overrides: Any) -> JormConfig:
     from jormungandr.config import load_config
 
     config = load_config(config_path)
@@ -28,7 +37,9 @@ def _load(config_path: Path, **overrides: Any):
     return config.model_copy(update=changes) if changes else config
 
 
-def _with_run_overrides(config, *, concurrency: int | None, output: Path | None):
+def _with_run_overrides(
+    config: JormConfig, *, concurrency: int | None, output: Path | None
+) -> JormConfig:
     """Apply CLI overrides onto the nested models.
 
     Kept explicit rather than generic: two knobs are worth two lines, and a
@@ -182,7 +193,7 @@ def run(
 
     done = 0
 
-    def progress(result) -> None:
+    def progress(result: RecordResult) -> None:
         nonlocal done
         done += 1
         turns = result.turns
@@ -205,7 +216,7 @@ def run(
     return 0 if report.ok else 1
 
 
-def _first_failure(turns) -> str:
+def _first_failure(turns: Sequence[TurnResult]) -> str:
     for turn in turns:
         if turn.timed_out:
             return f"turn {turn.index} timed out"

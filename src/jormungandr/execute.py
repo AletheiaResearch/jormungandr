@@ -28,7 +28,7 @@ from typing import Any
 
 from jormungandr.config.models import JormConfig
 from jormungandr.config.prompts import PromptRecord
-from jormungandr.runtime.run import HarnessRun, PromptRunner
+from jormungandr.runtime.run import HarnessRun, PromptRunner, TurnResult
 from jormungandr.runtime.spec import ContainerSpec, ResourceLimits
 
 __all__ = [
@@ -66,7 +66,7 @@ class RecordResult:
     error: str | None = None
 
     @property
-    def turns(self) -> tuple:
+    def turns(self) -> tuple[TurnResult, ...]:
         """Return the harness's turns, or empty if it never ran."""
         return self.run.turns if self.run else ()
 
@@ -180,7 +180,7 @@ def _container_spec(config: JormConfig, image: str) -> ContainerSpec:
         env=dict(config.run.env),
         env_files=tuple(str(p) for p in config.run.env_files),
         mounts=tuple(config.run.mounts),
-        network=config.run.network,  # type: ignore[arg-type]
+        network=config.run.network,
         limits=ResourceLimits(cpus=config.run.cpus, memory=config.run.memory),
     )
 
@@ -269,7 +269,10 @@ def _image_for(
     (directory / "workspace-image.txt").write_text(
         f"{result.reference}\n{source.clone_url}@{commit}\n", encoding="utf-8"
     )
-    return result.reference
+    # `builder` is deliberately Any — the tests substitute a fake with no
+    # daemon — so the reference has to be pinned to a type here rather than
+    # inferred from it.
+    return str(result.reference)
 
 
 def _run_one(
@@ -281,6 +284,12 @@ def _run_one(
     builder: Any = None,
     platform: str = "",
 ) -> RecordResult:
+    if record.id is None:
+        # execute() derives an id for every record before submitting it, so
+        # this is unreachable from the public API. Stated rather than assumed:
+        # `output_dir / None` used to raise TypeError inside the worker, and
+        # future.result() re-raised it over the whole run's report.
+        raise ExecutionError("record reached the runner without an id")
     directory = output_dir / record.id
     if directory.exists():
         # Otherwise a re-run leaves last run's turn-*.txt and state/ beside the

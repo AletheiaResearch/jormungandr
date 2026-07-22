@@ -31,7 +31,7 @@ import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 __all__ = [
     "CommandResult",
@@ -75,7 +75,7 @@ class _CappedSink:
         self._kept = 0
         self.truncated = False
 
-    def drain(self, pipe) -> None:
+    def drain(self, pipe: IO[str] | None) -> None:
         if pipe is None:
             return
         with contextlib.suppress(Exception):
@@ -210,7 +210,8 @@ class DockerCli:
                 # closed pipe nor exits. A bare wait() would block here for as
                 # long as the build runs.
                 self._terminate_group(proc)
-                returncode = proc.poll() if proc.poll() is not None else -1
+                polled = proc.poll()
+                returncode = polled if polled is not None else -1
         if returncode != 0:
             raise DockerError(argv, returncode, "\n".join(tail))
 
@@ -239,7 +240,7 @@ class DockerCli:
 
     def inspect(self, reference: str) -> dict[str, Any]:
         proc = self.run(["inspect", reference], timeout=60)
-        payload = json.loads(proc.stdout)
+        payload: list[dict[str, Any]] = json.loads(proc.stdout)
         if not payload:
             raise DockerError(("inspect", reference), 1, "empty inspect response")
         return payload[0]
@@ -466,7 +467,7 @@ class DockerCli:
             return  # already reaped; its pid may since have been recycled
         try:
             group = os.getpgid(proc.pid)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError, PermissionError:
             with contextlib.suppress(Exception):
                 proc.kill()
             return

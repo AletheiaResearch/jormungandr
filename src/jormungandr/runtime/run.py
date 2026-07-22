@@ -25,7 +25,11 @@ from pathlib import Path
 
 from jormungandr.runtime.container import ContainerRuntime, ContainerSession
 from jormungandr.runtime.docker import CommandResult
-from jormungandr.runtime.invocation import HarnessInvocation, invocation_for
+from jormungandr.runtime.invocation import (
+    HarnessInvocation,
+    Invocation,
+    invocation_for,
+)
 from jormungandr.runtime.spec import ContainerSpec
 
 __all__ = ["HarnessRun", "PromptRunner", "TurnResult"]
@@ -128,7 +132,7 @@ class PromptRunner:
             env=dict(env or {}),
             env_files=tuple(env_files),
             mounts=tuple(mounts),
-            network=network,  # type: ignore[arg-type]
+            network=network,
         )
 
         # Harnesses take a system prompt differently: droid has a flag, opencode
@@ -175,7 +179,7 @@ class PromptRunner:
         )
 
     def _exec(
-        self, session: ContainerSession, call, *, timeout: float | None
+        self, session: ContainerSession, call: Invocation, *, timeout: float | None
     ) -> CommandResult:
         """Run one invocation, delivering the prompt on stdin.
 

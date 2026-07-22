@@ -31,9 +31,10 @@ import signal
 import threading
 import uuid
 import weakref
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from types import FrameType
+from typing import Any
 
 from jormungandr.runtime.docker import CommandResult, DockerCli
 from jormungandr.runtime.identity import LABEL_NAMESPACE
@@ -105,7 +106,7 @@ class ContainerSession:
         *,
         stdin: str | None,
         timeout: float | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> CommandResult:
         """Run a command, feeding ``stdin`` to it.
 
@@ -120,7 +121,7 @@ class ContainerSession:
         *,
         timeout: float | None = None,
         shell: str = "sh",
-        **kwargs,
+        **kwargs: Any,
     ) -> CommandResult:
         """Run a shell snippet.
 
@@ -399,7 +400,10 @@ class ContainerRuntime:
 
         atexit.register(shutdown_if_alive)
 
-        previous: dict[int, object] = {}
+        # Exactly what `signal.signal` accepts back, which is what `previous`
+        # exists to hold. `getsignal` also returns None — see below — and that
+        # is normalised away before anything is stored here.
+        previous: dict[int, Callable[[int, FrameType | None], Any] | int] = {}
 
         def handle(signum: int, _frame: FrameType | None) -> None:
             shutdown_if_alive()
