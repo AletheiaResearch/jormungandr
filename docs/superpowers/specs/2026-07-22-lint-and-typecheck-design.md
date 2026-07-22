@@ -26,20 +26,46 @@ effect.
 
 ## What is adopted
 
-**Ruff**, for lint and formatting. **mypy**, strict, on `src/`. Both configured
-in `pyproject.toml` and added to the existing `dev` dependency group. Nothing
-new appears in the repo root.
+**Ruff**, for lint and formatting. **mypy**, strict, on `src/`. **tox**, as the
+task runner and CI entry point. **GitHub Actions**, calling tox. **Coverage**,
+via `pytest-cov`.
+
+Ruff and mypy are configured in `pyproject.toml`; tox gets its own `tox.ini`.
+
+### On tox — a reversed decision
+
+An earlier draft of this spec dropped tox, on the reasoning that at a single
+Python version it is ~40 lines of configuration replacing four `uv run` lines,
+and that its benefits did not carry that weight *while there was no CI to call
+it from*.
+
+That reasoning was wrong because its premise was. The established pattern in
+this author's other projects is tox as precisely that CI entry point —
+`.github/workflows/check.yml` installs `tox --with tox-uv --with tox-gh` and
+runs bare `tox`, with `[gh.python]` mapping the interpreter to its env list.
+Under that pattern tox is not ceremony wrapping `uv run`; it is the single
+command that CI and a developer both invoke, and per-env `dependency_groups`
+give each gate an isolated environment that one shared `.venv` cannot.
+
+The three consequences: `tox.ini` rather than `[tool.tox]` in `pyproject.toml`
+(matching the reference project), separate `test`/`lint`/`type` dependency
+groups with `dev` composing them via `include-group`, and a CI workflow in the
+same change — without it, `[gh.python]` is inert and the gates run only when
+someone remembers.
+
+### Python floor moves to 3.14
+
+Rather than a 3.13/3.14 matrix, `requires-python` moves to `>=3.14` and there
+is one interpreter env. Verified before adopting: all dependencies have cp314
+wheels (`pyarrow` 25.0.0, `pydantic` 2.13.4), and the full fast suite is **419
+passed, 38 deselected on 3.14.5**. Ruff's `target-version = "py314"` produces
+byte-identical output to `py313` on this tree — 260 findings either way — so
+the bump costs nothing in lint churn.
+
+This also retires the `pyarrow` cp315 concern noted earlier; it becomes live
+again at 3.15. `pyarrow` remains declared and imported nowhere.
 
 ### What is deliberately not adopted
-
-**tox.** It was requested and then dropped once measured. At a single Python
-version it is roughly 40 lines of configuration replacing four `uv run` lines.
-Its two real benefits — `--locked` enforced by default, and isolated per-task
-virtualenvs — do not carry that weight while there is no CI to call it from.
-Revisit if a 3.14 matrix becomes a real promise rather than a theoretical one:
-the suite already passes on 3.14.5, so the matrix is available whenever it is
-wanted. Note that `pyarrow` has no cp315 wheels, which will constrain the
-matrix, and that `pyarrow` is currently declared but imported nowhere.
 
 **flake8 and flake8-pydantic.** Measured return is 4 findings, all `PYD003`,
 all in `runtime/spec.py`, and arguably 0 actionable — lines 69/70/72 sit in a
@@ -63,9 +89,22 @@ cult rather than forward compatibility.
 ## Configuration
 
 ```toml
+[project]
+requires-python = ">=3.14"
+
+[dependency-groups]
+dev = [
+  { include-group = "test" },
+  { include-group = "lint" },
+  { include-group = "type" },
+]
+test = ["pytest>=8", "pytest-cov>=6"]
+lint = ["ruff>=0.15"]
+type = ["mypy>=2", "types-PyYAML"]
+
 [tool.ruff]
 line-length = 88
-target-version = "py313"
+target-version = "py314"
 src = ["src"]
 
 [tool.ruff.lint]
@@ -89,11 +128,82 @@ max-args = 8
 
 [tool.mypy]
 files = ["src"]
+python_version = "3.14"
 strict = true
+show_error_codes = true
 plugins = ["pydantic.mypy"]
 local_partial_types = true   # stated explicitly: mypy 2.0 made these defaults,
 strict_bytes = true          # so a downgrade cannot silently relax them
 ```
+
+And `tox.ini`, modelled on the reference project:
+
+```ini
+[tox]
+requires =
+    tox>=4.24.1
+    tox-uv>=1.23
+env_list =
+    3.14
+    lint
+    type
+skip_missing_interpreters = true
+
+[testenv]
+runner = {env:TOX_RUNNER:uv-venv-lock-runner}
+description = run the unit tests with pytest under {base_python}
+pass_env =
+    PYTEST_*
+commands =
+    python -m pytest {tty:--color=yes} \
+      --cov=jormungandr --cov-branch \
+      --cov-report=xml --cov-report=html \
+      --cov-report term-missing:skip-covered \
+      {posargs:tests}
+dependency_groups = test
+
+[testenv:docker]
+runner = {env:TOX_RUNNER:uv-venv-lock-runner}
+description = run the tests that need a Docker daemon
+pass_env =
+    PYTEST_*
+    DOCKER_HOST
+commands =
+    python -m pytest {tty:--color=yes} -m docker {posargs:tests}
+dependency_groups = test
+
+[testenv:lint]
+runner = {env:TOX_RUNNER:uv-venv-lock-runner}
+description = lint and format-check the code base
+commands =
+    ruff check {posargs:.}
+    ruff format --check {posargs:.}
+dependency_groups = lint
+
+[testenv:type]
+runner = {env:TOX_RUNNER:uv-venv-lock-runner}
+description = run type check on code base
+commands =
+    mypy {posargs:src}
+dependency_groups = type
+
+[gh.python]
+"3.14" = ["3.14", "lint", "type"]
+```
+
+`docker` is deliberately outside `env_list`: bare `tox` must not require a
+daemon. It stays opt-in as `tox -e docker`, consistent with the existing
+`addopts = "-m 'not docker'"`. A command-line `-m docker` overrides that
+`addopts` value, which is the mechanism CLAUDE.md already documents.
+
+Coverage measures `--cov=jormungandr` (the installed package) rather than
+`--cov=src`, and no `fail_under` threshold is set. Establishing a threshold
+against an unmeasured baseline would either be meaningless or immediately
+block; setting one is its own decision, once a number exists.
+
+And `.github/workflows/check.yml`, mirroring the reference project: `setup-uv`,
+then `uv tool install --python-preference only-managed --python 3.14 tox --with
+tox-uv --with tox-gh`, then bare `tox`.
 
 ### Why each ignore earns its line
 
@@ -136,6 +246,10 @@ With the configuration above:
 `types-PyYAML` is the only stub package needed; `pydantic` and `cyclopts` both
 ship `py.typed`.
 
+Both figures are invariant across the Python floor change: ruff gives 260 at
+`py313` and `py314`, mypy gives 33 at `--python-version 3.13` and `3.14`. The
+3.14 bump therefore adds no work to any task below.
+
 Of the 33 mypy errors, roughly 2 are real bugs, 2 are latent, and the rest is
 annotation debt — of which 11 die from 9 one-line edits, the largest being
 three `tuple[str, ...]` widenings that also delete 18 errors in `tests/` and 14
@@ -160,9 +274,38 @@ defect before fixing it.
 | 9 | `docs: document the config API` | part of the 164 docstrings |
 | 10 | `docs: document the runtime API` | " |
 | 11 | `docs: document the cli and commands API` | " |
-| 12 | `fix(runtime): drop Field() calls that only set a default` | the 4 `PYD003`, by hand |
-| 13 | `build: add ruff and mypy configuration` | lands green |
-| 14 | `docs: record the lint and type commands in CLAUDE.md` | |
+| 12 | `fix(runtime): drop the Field() call that only sets a default` | `spec.py:117` only — see below |
+| 13 | `build!: require Python 3.14` | `requires-python`, `.python-version`, relock. Breaking, hence `!` |
+| 14 | `build: add ruff and mypy configuration` | lands green |
+| 15 | `build: run the gates under tox` | `tox.ini`, `test`/`lint`/`type` dependency groups, `pytest-cov` |
+| 16 | `ci: run tox on push and pull request` | `.github/workflows/check.yml`; makes `[gh.python]` live |
+| 17 | `docs: record the tox commands in CLAUDE.md` | |
+
+### Task 12 is smaller than it looked
+
+The spec originally said "fix the 4 `PYD003` by hand". Reading the code changes
+that. The four sites are `runtime/spec.py:69`, `:70`, `:72` and `:117`.
+
+Lines 68–73 are one block:
+
+```python
+cpus: float | None = Field(default=2.0, gt=0)      # must keep Field — gt=0
+memory: str | None = Field(default="4g")           # PYD003
+memory_swap: str | None = Field(default=None)      # PYD003
+pids: int | None = Field(default=512, gt=0)        # must keep Field — gt=0
+shm_size: str | None = Field(default=None)         # PYD003
+nofile: int | None = Field(default=4096, gt=0)     # must keep Field — gt=0
+```
+
+"Fixing" 69/70/72 leaves three fields using `Field(...)` and three bare, in an
+alternating pattern, for no benefit any tool now checks — flake8 was dropped.
+Leave them.
+
+Line 117 is different: `tier_split: int = Field(default=20)` sits beside
+`modules: tuple[ModuleDeclaration, ...] = ()`, which is already a bare default.
+That one is fixed, and the block gets more consistent rather than less.
+
+One line changes, not four.
 
 Configuration lands last so that every preceding commit is independently green
 and the gate is green the moment it exists. The alternative — land the config
@@ -189,6 +332,14 @@ uv run mypy
 uv run pytest -m ""          # including the docker-marked tests
 ```
 
+Once tox lands (step 15), the same gates are one command — and it is the
+command CI runs, so a green `tox` locally means a green CI:
+
+```sh
+tox                          # 3.14 + lint + type
+tox -e docker                # opt-in, needs a daemon
+```
+
 Then the Docker hygiene check from CLAUDE.md, since `pytest -m ""` starts
 containers:
 
@@ -205,9 +356,15 @@ docker ps -a --filter 'label=dev.jormungandr.session' -q | wc -l
   `disallow_untyped_calls` disabled, which is the setting that surfaces the
   useful signal — whether the fakes have drifted from the real signatures — at
   around 110–150 errors rather than 256.
-- **CI.** There is none. These gates are only as good as the habit of running
-  them until something runs them automatically.
+- **A coverage threshold.** `pytest-cov` reports; nothing fails on a number.
+  Setting `fail_under` against a baseline nobody has measured would either be
+  meaningless or block immediately. Pick one once a real figure exists.
 - **`uv check` runs `ty`, not mypy.** A contributor typing the obvious command
-  gets a different type checker with different answers. Step 14 names the real
+  gets a different type checker with different answers. Step 17 names the real
   commands in CLAUDE.md; that is the mitigation.
-- **`pyarrow`** is declared as a dependency and imported nowhere.
+- **`pyarrow`** is declared as a dependency and imported nowhere. It constrains
+  the Python floor (no cp315 wheels) for no benefit. Removing it is its own
+  concern, and wants a check of whether the trace-reading boundary described in
+  `docs/notes.md` is expected to need it.
+- **Python 3.15.** Blocked on `pyarrow` cp315 wheels for as long as `pyarrow`
+  stays declared.
