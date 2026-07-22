@@ -16,8 +16,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # v7 is the highest floating major tag this action publishes; its latest
+      # release is v9.0.0 but no `v9` alias exists. v7 already runs on node24,
+      # which is what the deprecation warning was about.
       - name: Install uv
-        uses: astral-sh/setup-uv@v9
+        uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
           enable-cache: true
