@@ -427,6 +427,16 @@ class ContainerRuntime:
                 # the signal. Normalise here so `previous` only ever holds
                 # something that can be restored.
                 current = signal.getsignal(signum)
+                if current is signal.SIG_IGN:
+                    # Inherited as ignored, which whoever launched us chose:
+                    # `nohup`, a supervisor, a parent that set it before exec.
+                    # POSIX convention is to leave it alone, and there is a
+                    # concrete failure behind the convention — handling it
+                    # would reap every container on a SIGTERM that was meant to
+                    # be a no-op, then honour the inherited SIG_IGN and keep
+                    # running, leaving a live process with its containers
+                    # silently destroyed.
+                    continue
                 previous[signum] = signal.SIG_DFL if current is None else current
                 signal.signal(signum, handle)
 

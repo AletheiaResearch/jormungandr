@@ -449,6 +449,38 @@ class TestSignalHandlerRestore:
         assert signal.getsignal(signal.SIGINT) is original
         assert killed == [signal.SIGINT]
 
+    def test_does_not_handle_a_signal_the_parent_ignored(
+        self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # POSIX convention: do not handle a signal inherited as SIG_IGN — the
+        # parent set that deliberately. Overriding it means a run launched
+        # under `nohup` or a supervisor tears down every container on a SIGTERM
+        # that was supposed to be a no-op, then correctly honours the inherited
+        # SIG_IGN and keeps running, with its containers silently gone and no
+        # way to observe it.
+        installed: dict[int, object] = {}
+        real_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            installed[signum] = handler
+            return real_signal(signum, handler)
+
+        monkeypatch.setattr(
+            signal,
+            "getsignal",
+            lambda signum: signal.SIG_IGN
+            if signum == signal.SIGTERM
+            else signal.SIG_DFL,
+        )
+        monkeypatch.setattr(signal, "signal", recording_signal)
+
+        ContainerRuntime(docker=FakeDocker(), install_handlers=True)
+
+        assert signal.SIGTERM not in installed, "installed a handler over SIG_IGN"
+        # The other signal must still be handled, or "fix" it by installing
+        # nothing at all and this test would still pass.
+        assert signal.SIGINT in installed
+
     def test_reaps_containers_before_re_raising(
         self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
     ) -> None:
