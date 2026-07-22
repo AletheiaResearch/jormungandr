@@ -24,19 +24,21 @@ from jormungandr.runtime.layers import (
     Instruction,
     Run,
     User,
+)
+from jormungandr.runtime.layers import (
     Workdir as Workdir_,
 )
 from jormungandr.runtime.modules.base import BuildContext, ModuleError, Stage
 from jormungandr.runtime.modules.installers import Installer, NpmGlobal
-from jormungandr.runtime.modules.registry import REGISTRY
+from jormungandr.runtime.modules.registry import REGISTRY, ModuleRegistry
 
 __all__ = [
+    "AptPackages",
     "Droid",
     "Harness",
-    "OpenCode",
-    "AptPackages",
     "Langfuse",
     "NodeToolchain",
+    "OpenCode",
     "PythonToolchain",
     "Script",
     "UserAccount",
@@ -88,8 +90,13 @@ def _quoted_arg(value: object, *, what: str) -> str:
 
 def _safe_uid(value: object) -> int:
     try:
-        uid = int(value)
-    except (TypeError, ValueError):
+        # `int()` is itself the validation here — ModuleDeclaration does not
+        # coerce, so YAML hands this whatever was written, and both the
+        # TypeError and the ValueError below are load-bearing. Typing the
+        # parameter narrowly instead would reject a float uid that int()
+        # accepts today.
+        uid: int = int(value)  # type: ignore[call-overload]
+    except TypeError, ValueError:
         raise ModuleError(f"uid must be an integer, got {value!r}") from None
     if not 0 <= uid <= 2**31 - 1:
         raise ModuleError(f"uid out of range: {uid}")
@@ -119,7 +126,7 @@ class AptPackages:
         self.name = name
         self.packages = cleaned
 
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:  # noqa: ARG002 - `context` is the Module protocol's signature; this module bakes no files
         return [
             Comment(f"apt packages: {', '.join(self.packages)}"),
             Run(
@@ -159,7 +166,7 @@ class NodeToolchain:
         self.version = _safe_token(version, what="node version")
         self.preinstalled = bool(preinstalled)
 
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:  # noqa: ARG002 - `context` is the Module protocol's signature; this module bakes no files
         if self.preinstalled:
             return [Comment(f"node {self.version} provided by the base image")]
         return [
@@ -196,7 +203,7 @@ class PythonToolchain:
         self.name = name
         self.venv = _safe_token(venv, what="venv path")
 
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:  # noqa: ARG002 - `context` is the Module protocol's signature; this module bakes no files
         return [
             Comment("python venv + uv"),
             # Self-contained: slim base images carry no python3, and a module
@@ -273,7 +280,7 @@ class Harness:
             raise ModuleError(f"harness {name!r} does not accept a config document")
 
     def config_document(self) -> str | None:
-        """The harness's config file content, or None.
+        """Render the harness's config file content, or None if it needs none.
 
         Serialized canonically (`sort_keys`) for the same reason
         `identity.canonical_json` exists: an unstable byte representation means
@@ -474,7 +481,7 @@ class Droid(Harness):
 
     CONFIG_PATH = ".factory/settings.json"
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - nine keyword-only knobs, each a droid CLI setting; a settings object here would only rename the same nine
         self,
         *,
         version: str = DEFAULT_VERSION,
@@ -550,7 +557,7 @@ class Droid(Harness):
                     entry["maxOutputTokens"] = provider.max_output_tokens  # type: ignore[attr-defined]
                 custom.append(entry)
         selected = index_of[model_ref]
-        display = custom[selected]["displayName"]
+        display = str(custom[selected]["displayName"])
         return {
             "customModels": custom,
             "sessionDefaultSettings": {"model": f"custom:{display}-{selected}"},
@@ -585,12 +592,12 @@ class Langfuse:
         _quoted_arg(self.version, what="langfuse version")
         self.requires = tuple(requires)
 
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:  # noqa: ARG002 - `context` is the Module protocol's signature; this module bakes no files
         return [
             Comment("langfuse tracing over OTLP"),
             Run(
                 "pip install "
-                f'{_quoted_arg("langfuse" + self.version, what="langfuse pin")} '
+                f"{_quoted_arg('langfuse' + self.version, what='langfuse pin')} "
                 "'opentelemetry-sdk' 'opentelemetry-exporter-otlp'",
                 mounts=_PIP_CACHE,
             ),
@@ -687,7 +694,7 @@ class UserAccount:
         self.uid = _safe_uid(uid)
         self.home = _safe_token(home or f"/home/{self.user}", what="home directory")
 
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:  # noqa: ARG002 - `context` is the Module protocol's signature; this module bakes no files
         return [
             Comment(f"user {self.user} (uid {self.uid}, HOME={self.home})"),
             # useradd is shadow-utils and absent on alpine, which provides
@@ -741,7 +748,7 @@ class Workdir:
         self.user = _safe_token(user, what="workdir user")
         self.requires = tuple(requires)
 
-    def instructions(self, context: BuildContext) -> Sequence[Instruction]:
+    def instructions(self, context: BuildContext) -> Sequence[Instruction]:  # noqa: ARG002 - `context` is the Module protocol's signature; this module bakes no files
         return [
             Comment(f"workdir {self.path} owned by {self.user}"),
             Run([f"mkdir -p {self.path}", f"chown -R {self.user} {self.path}"]),
@@ -753,7 +760,7 @@ class Workdir:
         return {"path": self.path, "user": self.user}
 
 
-def register_builtins(registry=REGISTRY) -> None:
+def register_builtins(registry: ModuleRegistry = REGISTRY) -> None:
     """Register the built-in modules. Idempotent."""
     factories = {
         "apt": AptPackages,

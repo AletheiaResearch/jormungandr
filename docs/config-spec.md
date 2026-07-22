@@ -217,7 +217,7 @@ Two optional additions, neither required by a Teich file:
 
 | Field | Meaning |
 |---|---|
-| `clone_url` | Any git URL — https, ssh, or a local path. Not just GitHub. |
+| `clone_url` | A git URL: `http(s)://`, `ssh://`, `git://`, or `user@host:path`. Not just GitHub, and not a host path — the clone happens inside the image. Anything else is rejected at load time, because this string reaches `git ls-remote` as an argument vector. |
 | `ref` | Branch, tag or commit. Unset means the default branch, which makes the run unreproducible. |
 | `subdirectory` | Use one directory of the repo as the content. For monorepos. |
 | `clone_as` | Directory the content lands in, below the working directory. Unset puts the repo at the root. |

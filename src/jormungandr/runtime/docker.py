@@ -31,13 +31,13 @@ import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 __all__ = [
     "CommandResult",
-    "DockerError",
-    "DockerNotAvailable",
     "DockerCli",
+    "DockerError",
+    "DockerNotAvailableError",
 ]
 
 
@@ -52,7 +52,7 @@ class DockerError(RuntimeError):
         super().__init__(f"`{rendered} ...` failed ({returncode}): {self.stderr}")
 
 
-class DockerNotAvailable(DockerError):
+class DockerNotAvailableError(DockerError):
     """The docker CLI or daemon is unreachable."""
 
     def __init__(self, detail: str) -> None:
@@ -75,7 +75,7 @@ class _CappedSink:
         self._kept = 0
         self.truncated = False
 
-    def drain(self, pipe) -> None:
+    def drain(self, pipe: IO[str] | None) -> None:
         if pipe is None:
             return
         with contextlib.suppress(Exception):
@@ -142,7 +142,7 @@ class DockerCli:
     ) -> subprocess.CompletedProcess[str]:
         argv = self._argv(args)
         try:
-            proc = subprocess.run(
+            proc = subprocess.run(  # noqa: S603 - argv is [self.executable, *args], a list this module builds; shell=False, so nothing is interpolated
                 argv,
                 capture_output=True,
                 text=True,
@@ -151,7 +151,9 @@ class DockerCli:
                 check=False,
             )
         except FileNotFoundError as exc:
-            raise DockerNotAvailable(f"{self.executable!r} not found on PATH") from exc
+            raise DockerNotAvailableError(
+                f"{self.executable!r} not found on PATH"
+            ) from exc
         except subprocess.TimeoutExpired as exc:
             raise DockerError(argv, -1, f"timed out after {exc.timeout}s") from exc
         if check and proc.returncode != 0:
@@ -174,7 +176,7 @@ class DockerCli:
         argv = self._argv(args)
         merged_env = {**os.environ, **(env or {})}
         try:
-            proc = subprocess.Popen(
+            proc = subprocess.Popen(  # noqa: S603 - argv is [self.executable, *args], a list this module builds; shell=False, so nothing is interpolated
                 argv,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -184,10 +186,13 @@ class DockerCli:
                 env=merged_env,
             )
         except FileNotFoundError as exc:
-            raise DockerNotAvailable(f"{self.executable!r} not found on PATH") from exc
+            raise DockerNotAvailableError(
+                f"{self.executable!r} not found on PATH"
+            ) from exc
 
         tail: list[str] = []
-        assert proc.stdout is not None
+        if proc.stdout is None:  # stdout=PIPE was requested, so this cannot happen
+            raise DockerError(argv, -1, "docker produced no output stream")
         try:
             for line in proc.stdout:
                 stripped = line.rstrip("\n")
@@ -205,7 +210,8 @@ class DockerCli:
                 # closed pipe nor exits. A bare wait() would block here for as
                 # long as the build runs.
                 self._terminate_group(proc)
-                returncode = proc.poll() if proc.poll() is not None else -1
+                polled = proc.poll()
+                returncode = polled if polled is not None else -1
         if returncode != 0:
             raise DockerError(argv, returncode, "\n".join(tail))
 
@@ -222,7 +228,7 @@ class DockerCli:
 
     def require(self) -> None:
         if not self.available():
-            raise DockerNotAvailable(
+            raise DockerNotAvailableError(
                 "could not reach the Docker daemon; is Docker running?"
             )
 
@@ -234,13 +240,13 @@ class DockerCli:
 
     def inspect(self, reference: str) -> dict[str, Any]:
         proc = self.run(["inspect", reference], timeout=60)
-        payload = json.loads(proc.stdout)
+        payload: list[dict[str, Any]] = json.loads(proc.stdout)
         if not payload:
             raise DockerError(("inspect", reference), 1, "empty inspect response")
         return payload[0]
 
     def image_digest(self, reference: str) -> str:
-        """The image's content-addressable ID.
+        """Return the image's content-addressable ID.
 
         Downstream operations reference this rather than the tag: a mutable tag
         can be reassigned by a concurrent build or an external ``docker tag``,
@@ -256,8 +262,13 @@ class DockerCli:
         # than an error.
         quoted = json.dumps(label)
         proc = self.run(
-            ["image", "inspect", "--format", f"{{{{index .Config.Labels {quoted}}}}}",
-             reference],
+            [
+                "image",
+                "inspect",
+                "--format",
+                f"{{{{index .Config.Labels {quoted}}}}}",
+                reference,
+            ],
             check=False,
             timeout=60,
         )
@@ -338,7 +349,7 @@ class DockerCli:
     def copy_out(self, container: str, source: str, destination: Path | str) -> None:
         self.run(["cp", f"{container}:{source}", str(destination)], timeout=300)
 
-    def exec(
+    def exec(  # noqa: PLR0912 - one branch per optional `docker exec` flag; splitting it would only scatter the flag list
         self,
         container: str,
         command: Sequence[str],
@@ -378,7 +389,7 @@ class DockerCli:
         argv = self._argv(args)
         started = time.monotonic()
         try:
-            proc = subprocess.Popen(
+            proc = subprocess.Popen(  # noqa: S603 - argv is [self.executable, *args]; `command` reaches docker as separate argv entries, never a shell string
                 argv,
                 stdin=subprocess.PIPE if stdin is not None else None,
                 stdout=subprocess.PIPE,
@@ -387,7 +398,9 @@ class DockerCli:
                 start_new_session=True,
             )
         except FileNotFoundError as exc:
-            raise DockerNotAvailable(f"{self.executable!r} not found on PATH") from exc
+            raise DockerNotAvailableError(
+                f"{self.executable!r} not found on PATH"
+            ) from exc
 
         if stdin is not None and proc.stdin is not None:
             # Write and close before waiting: the harness blocks until it sees
@@ -454,7 +467,7 @@ class DockerCli:
             return  # already reaped; its pid may since have been recycled
         try:
             group = os.getpgid(proc.pid)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError, PermissionError:
             with contextlib.suppress(Exception):
                 proc.kill()
             return

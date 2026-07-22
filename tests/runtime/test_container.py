@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import atexit
 import os
+import signal
 import socket
+import subprocess
+import sys
 import weakref
+from types import FrameType
 
 import pytest
 
+from jormungandr.runtime import container as container_module
 from jormungandr.runtime.container import (
     DETACHED_OWNER,
     MANAGED_LABEL,
@@ -79,7 +85,9 @@ class TestCreateArgs:
         assert f"{MANAGED_LABEL}=true" in args
         assert any(a.startswith(f"{SESSION_LABEL}=") for a in args)
 
-    def test_resource_limits_are_applied_by_default(self, runtime: ContainerRuntime) -> None:
+    def test_resource_limits_are_applied_by_default(
+        self, runtime: ContainerRuntime
+    ) -> None:
         runtime.create(ContainerSpec(image="img"))
         args = args_of(runtime)
         assert "--cpus" in args and "--memory" in args and "--pids-limit" in args
@@ -113,7 +121,8 @@ class TestCreateArgs:
 
     def test_limits_can_be_relaxed(self, runtime: ContainerRuntime) -> None:
         spec = ContainerSpec(
-            image="img", limits=ResourceLimits(cpus=None, memory=None, pids=None, nofile=None)
+            image="img",
+            limits=ResourceLimits(cpus=None, memory=None, pids=None, nofile=None),
         )
         runtime.create(spec)
         assert "--cpus" not in args_of(runtime)
@@ -130,10 +139,12 @@ class TestSessionLifecycle:
         assert cid in runtime.docker.removed  # type: ignore[attr-defined]
 
     def test_session_removes_on_exception(self, runtime: ContainerRuntime) -> None:
-        with pytest.raises(RuntimeError):
-            with runtime.session(ContainerSpec(image="img")) as session:
-                cid = session.container_id
-                raise RuntimeError("boom")
+        with (
+            pytest.raises(RuntimeError),
+            runtime.session(ContainerSpec(image="img")) as session,
+        ):
+            cid = session.container_id
+            raise RuntimeError("boom")
         assert cid in runtime.docker.removed  # type: ignore[attr-defined]
 
     def test_remove_is_idempotent(self, runtime: ContainerRuntime) -> None:
@@ -180,7 +191,9 @@ class TestReaping:
         host = socket.gethostname()
         docker = FakeDocker(
             containers=[
-                container_row(cid="a" * 64, name="jormungandr-dead", owner=f"{DEAD_PID}@{host}")
+                container_row(
+                    cid="a" * 64, name="jormungandr-dead", owner=f"{DEAD_PID}@{host}"
+                )
             ]
         )
         runtime = ContainerRuntime(docker=docker, install_handlers=False)
@@ -229,7 +242,9 @@ class TestReaping:
         host = socket.gethostname()
         docker = FakeDocker(
             containers=[
-                container_row(cid="b" * 64, name="other-live", owner=f"{os.getpid()}@{host}")
+                container_row(
+                    cid="b" * 64, name="other-live", owner=f"{os.getpid()}@{host}"
+                )
             ]
         )
         runtime = ContainerRuntime(docker=docker, install_handlers=False)
@@ -237,7 +252,9 @@ class TestReaping:
 
     def test_does_not_reap_detached_runs(self) -> None:
         docker = FakeDocker(
-            containers=[container_row(cid="c" * 64, name="detached", owner=DETACHED_OWNER)]
+            containers=[
+                container_row(cid="c" * 64, name="detached", owner=DETACHED_OWNER)
+            ]
         )
         runtime = ContainerRuntime(docker=docker, install_handlers=False)
         assert runtime.reap_orphans() == []
@@ -256,7 +273,11 @@ class TestReaping:
     def test_foreign_host_owner_is_left_alone(self) -> None:
         # A pid from another machine says nothing about a pid here.
         docker = FakeDocker(
-            containers=[container_row(cid="e" * 64, name="remote", owner=f"{DEAD_PID}@elsewhere")]
+            containers=[
+                container_row(
+                    cid="e" * 64, name="remote", owner=f"{DEAD_PID}@elsewhere"
+                )
+            ]
         )
         runtime = ContainerRuntime(docker=docker, install_handlers=False)
         assert runtime.reap_orphans() == []
@@ -278,7 +299,8 @@ class TestShutdownRobustness:
         # second Ctrl-C unwinds the loop; the atexit retry then finds nothing.
         docker = FakeDocker()
         runtime = ContainerRuntime(docker=docker, install_handlers=False)
-        sessions = [runtime.create(ContainerSpec(image="img")) for _ in range(3)]
+        for _ in range(3):
+            runtime.create(ContainerSpec(image="img"))
 
         calls = {"n": 0}
         real_remove = docker.remove_container
@@ -309,7 +331,10 @@ class TestShutdownRobustness:
 
 
 class TestHandlerLifetime:
-    def test_runtimes_are_not_pinned_by_atexit(self) -> None:
+    def test_runtimes_are_not_pinned_by_atexit(self, restore_signal_handlers) -> None:
+        # The fixture is not decoration: this installs the process-wide
+        # handlers, and without undoing that every later test in the session
+        # finds them already installed and silently exercises nothing.
         import gc
 
         runtime = ContainerRuntime(docker=FakeDocker(), install_handlers=True)
@@ -317,3 +342,259 @@ class TestHandlerLifetime:
         del runtime
         gc.collect()
         assert ref() is None, "atexit/handler closure kept the runtime alive"
+
+
+@pytest.fixture
+def restore_signal_handlers():
+    """Put SIGINT/SIGTERM, and the module's own handler state, back.
+
+    Handlers are installed once per *process*, so a test that installs them
+    leaves the module believing they are already installed and every later test
+    silently gets a no-op. Both halves have to be undone: the interpreter's
+    handlers, and the module-level record of them.
+    """
+    saved = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    yield
+    for signum, handler in saved.items():
+        signal.signal(signum, handler)
+    atexit.unregister(container_module._reap_all)
+    container_module._HANDLERS_INSTALLED = False
+    container_module._HANDLED_SIGNALS.clear()
+    container_module._REAPED_AT_EXIT.clear()
+
+
+# Run out of process because the precondition — an interpreter whose SIGINT
+# handler Python did not install — is built by rebuilding the signal module's
+# handler table, which is not something to do inside a pytest process.
+_EMBEDDED_INTERPRETER_REPRO = """
+import os, signal, sys
+
+# `signal_exec` records None for any signal whose OS-level disposition is
+# neither SIG_DFL nor SIG_IGN when the table is built. Re-running it while
+# CPython's own C trampoline is installed for SIGINT reproduces exactly the
+# state an embedder leaves behind (uwsgi, mod_wsgi, gdb, a pyo3/pybind11 host
+# that called sigaction() before the signal module was first imported).
+del sys.modules["signal"]
+del sys.modules["_signal"]
+import signal
+
+if signal.getsignal(signal.SIGINT) is not None:
+    sys.exit("precondition failed: getsignal(SIGINT) did not report None")
+
+from jormungandr.runtime.container import ContainerRuntime
+
+class NoDocker:
+    def require(self):
+        raise AssertionError("the daemon must not be touched")
+
+ContainerRuntime(docker=NoDocker(), install_handlers=True)
+os.kill(os.getpid(), signal.SIGINT)
+sys.exit("still alive: the handler never re-raised the signal")
+"""
+
+
+class TestSignalHandlerRestore:
+    def test_dies_of_the_signal_when_python_did_not_install_the_handler(self) -> None:
+        # The whole point of the handler is that the shell still sees the real
+        # cause of death. Restoring `None` raises TypeError before `os.kill`
+        # is reached, so the process exits 1 with a traceback instead.
+        result = subprocess.run(
+            [sys.executable, "-c", _EMBEDDED_INTERPRETER_REPRO],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert "TypeError" not in result.stderr, result.stderr
+        assert result.returncode == -signal.SIGINT, (result.returncode, result.stderr)
+
+    def test_restores_sig_dfl_for_a_handler_python_did_not_install(
+        self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `getsignal` stores None rather than omitting the signal, so the key
+        # is present and `.get(signum, SIG_DFL)` never reaches its default.
+        installed: dict[int, object] = {}
+        real_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            installed[signum] = handler
+            return real_signal(signum, handler)
+
+        monkeypatch.setattr(signal, "getsignal", lambda signum: None)
+        monkeypatch.setattr(signal, "signal", recording_signal)
+        killed: list[int] = []
+        monkeypatch.setattr(os, "kill", lambda pid, signum: killed.append(signum))
+
+        ContainerRuntime(docker=FakeDocker(), install_handlers=True)
+        handle = installed[signal.SIGINT]
+        assert callable(handle)
+
+        handle(signal.SIGINT, None)
+
+        assert installed[signal.SIGINT] is signal.SIG_DFL
+        assert killed == [signal.SIGINT], "handler aborted before re-raising"
+
+    def test_restores_the_handler_python_did_install(
+        self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Guards against "fixing" the None case by always restoring SIG_DFL.
+        def original(signum: int, frame: FrameType | None) -> None:
+            raise AssertionError("not reached")
+
+        signal.signal(signal.SIGINT, original)
+        installed: dict[int, object] = {}
+        real_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            installed[signum] = handler
+            return real_signal(signum, handler)
+
+        monkeypatch.setattr(signal, "signal", recording_signal)
+        killed: list[int] = []
+        monkeypatch.setattr(os, "kill", lambda pid, signum: killed.append(signum))
+
+        ContainerRuntime(docker=FakeDocker(), install_handlers=True)
+        installed[signal.SIGINT](signal.SIGINT, None)
+
+        assert signal.getsignal(signal.SIGINT) is original
+        assert killed == [signal.SIGINT]
+
+    def test_many_runtimes_install_one_handler(
+        self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Handlers used to be installed per runtime, each capturing the
+        # previous one as what it would restore. Five runtimes therefore meant
+        # a five-deep chain and five atexit callbacks, of which four did
+        # nothing — their weakrefs were already dead. Nothing ever uninstalled,
+        # so merely constructing a runtime repointed SIGINT and SIGTERM for the
+        # life of the process.
+        installs: list[int] = []
+        real_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            installs.append(signum)
+            return real_signal(signum, handler)
+
+        monkeypatch.setattr(signal, "signal", recording_signal)
+
+        runtimes = [
+            ContainerRuntime(docker=FakeDocker(), install_handlers=True)
+            for _ in range(5)
+        ]
+
+        assert installs.count(signal.SIGINT) == 1, installs
+        assert installs.count(signal.SIGTERM) == 1, installs
+        assert len(runtimes) == 5
+
+    def test_every_live_runtime_is_reaped_by_one_handler(
+        self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # One handler now has to reap all of them, where previously each
+        # runtime's own handler reaped only itself and relied on the chain.
+        installed: dict[int, object] = {}
+        real_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            installed[signum] = handler
+            return real_signal(signum, handler)
+
+        monkeypatch.setattr(signal, "signal", recording_signal)
+        monkeypatch.setattr(os, "kill", lambda pid, signum: None)
+
+        first, second = FakeDocker(), FakeDocker()
+        runtime_a = ContainerRuntime(docker=first, install_handlers=True)
+        runtime_b = ContainerRuntime(docker=second, install_handlers=True)
+        session_a = runtime_a.create(ContainerSpec(image="img"))
+        session_b = runtime_b.create(ContainerSpec(image="img"))
+
+        installed[signal.SIGINT](signal.SIGINT, None)
+
+        assert first.removed == [session_a.container_id]
+        assert second.removed == [session_b.container_id]
+
+    def test_a_runtime_that_declined_handlers_is_not_reaped(
+        self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # install_handlers=False means "this runtime's lifetime is not tied to
+        # the process" — the detached path relies on it.
+        installed: dict[int, object] = {}
+        real_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            installed[signum] = handler
+            return real_signal(signum, handler)
+
+        monkeypatch.setattr(signal, "signal", recording_signal)
+        monkeypatch.setattr(os, "kill", lambda pid, signum: None)
+
+        handled = FakeDocker()
+        detached = FakeDocker()
+        # Bound to names deliberately: the registry holds runtimes weakly, so
+        # one created as a temporary is collected before the signal arrives and
+        # this would pass for the wrong reason.
+        handled_runtime = ContainerRuntime(docker=handled, install_handlers=True)
+        detached_runtime = ContainerRuntime(docker=detached, install_handlers=False)
+        handled_runtime.create(ContainerSpec(image="img"))
+        detached_runtime.create(ContainerSpec(image="img"))
+
+        installed[signal.SIGINT](signal.SIGINT, None)
+
+        assert handled.removed != []
+        assert detached.removed == []
+
+    def test_does_not_handle_a_signal_the_parent_ignored(
+        self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # POSIX convention: do not handle a signal inherited as SIG_IGN — the
+        # parent set that deliberately. Overriding it means a run launched
+        # under `nohup` or a supervisor tears down every container on a SIGTERM
+        # that was supposed to be a no-op, then correctly honours the inherited
+        # SIG_IGN and keeps running, with its containers silently gone and no
+        # way to observe it.
+        installed: dict[int, object] = {}
+        real_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            installed[signum] = handler
+            return real_signal(signum, handler)
+
+        monkeypatch.setattr(
+            signal,
+            "getsignal",
+            lambda signum: (
+                signal.SIG_IGN if signum == signal.SIGTERM else signal.SIG_DFL
+            ),
+        )
+        monkeypatch.setattr(signal, "signal", recording_signal)
+
+        ContainerRuntime(docker=FakeDocker(), install_handlers=True)
+
+        assert signal.SIGTERM not in installed, "installed a handler over SIG_IGN"
+        # The other signal must still be handled, or "fix" it by installing
+        # nothing at all and this test would still pass.
+        assert signal.SIGINT in installed
+
+    def test_reaps_containers_before_re_raising(
+        self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Reaping happens before the restore, so the TypeError does not cost
+        # the containers today — but it still escapes the handler. This pins
+        # the ordering the fix must not disturb.
+        installed: dict[int, object] = {}
+        real_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            installed[signum] = handler
+            return real_signal(signum, handler)
+
+        monkeypatch.setattr(signal, "getsignal", lambda signum: None)
+        monkeypatch.setattr(signal, "signal", recording_signal)
+        monkeypatch.setattr(os, "kill", lambda pid, signum: None)
+
+        docker = FakeDocker()
+        runtime = ContainerRuntime(docker=docker, install_handlers=True)
+        session = runtime.create(ContainerSpec(image="img"))
+
+        installed[signal.SIGINT](signal.SIGINT, None)
+
+        assert docker.removed == [session.container_id]

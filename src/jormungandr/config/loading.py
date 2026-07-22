@@ -48,7 +48,12 @@ def _apply_env_overrides(data: dict[str, Any], environ: dict[str, str]) -> None:
         previous = target.get(key)
         target[key] = value
         log.info(
-            "config: %s.%s = %s  (%s, overriding %r)", section, key, value, variable, previous
+            "config: %s.%s = %s  (%s, overriding %r)",
+            section,
+            key,
+            value,
+            variable,
+            previous,
         )
 
 
@@ -155,12 +160,13 @@ def resolve_prompts(config: JormConfig) -> tuple[PromptRecord, ...]:
 
 def compile_image_spec(config: JormConfig) -> Any:
     """Build the ImageSpec, including the harness with its translated config."""
-    from jormungandr.runtime.modules import REGISTRY, builtin  # noqa: F401
+    from jormungandr.runtime.modules import REGISTRY, builtin
     from jormungandr.runtime.spec import ImageSpec
 
-    harness_cls = {"droid": builtin.Droid, "opencode": builtin.OpenCode}[
-        config.harness.name
-    ]
+    harness_cls: type[builtin.Droid] | type[builtin.OpenCode] = {
+        "droid": builtin.Droid,
+        "opencode": builtin.OpenCode,
+    }[config.harness.name]
     translated = harness_cls.translate_providers(config.providers, config.harness.model)
 
     declaration: dict[str, Any] = {

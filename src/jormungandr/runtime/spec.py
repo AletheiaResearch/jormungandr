@@ -15,7 +15,7 @@ per-run value cannot accidentally end up in the image hash.
 from __future__ import annotations
 
 import platform as _platform
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -114,7 +114,7 @@ class ImageSpec(BaseModel):
     build_args: dict[str, str] = Field(default_factory=dict)
     labels: dict[str, str] = Field(default_factory=dict)
 
-    tier_split: int = Field(default=20)
+    tier_split: int = 20
     """Highest module stage that belongs to the base tier (default: TOOLCHAIN).
 
     Modules at or below this stage are baked into a separate, independently

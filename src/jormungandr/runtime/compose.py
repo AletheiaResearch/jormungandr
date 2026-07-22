@@ -25,14 +25,14 @@ from dataclasses import dataclass
 from jormungandr.runtime.identity import content_digest, image_labels, image_reference
 from jormungandr.runtime.layers import (
     Arg,
-    Run,
-    User,
-    Workdir,
     Comment,
     Copy,
     From,
     Instruction,
     Label,
+    Run,
+    User,
+    Workdir,
     render_dockerfile,
 )
 from jormungandr.runtime.modules.base import BuildContext, Module
@@ -43,11 +43,11 @@ __all__ = [
     "BASE_TIER",
     "RUNTIME_TIER",
     "WORKSPACE_TIER",
-    "compose_workspace",
     "ComposeError",
     "ComposedImage",
     "ComposedLayer",
     "compose",
+    "compose_workspace",
 ]
 
 BASE_TIER = "base"
@@ -150,7 +150,9 @@ def _check_context_files_are_used(
 def _matches_glob(name: str, pattern: str) -> bool:
     from fnmatch import fnmatch
 
-    return ("*" in pattern or "?" in pattern or "[" in pattern) and fnmatch(name, pattern)
+    return ("*" in pattern or "?" in pattern or "[" in pattern) and fnmatch(
+        name, pattern
+    )
 
 
 def _compose_layer(
@@ -199,7 +201,8 @@ def _compose_layer(
             # image and must be part of its identity.
             "labels": dict(spec.labels),
             "modules": [
-                {"name": m.name, "stage": m.stage, **dict(m.identity())} for m in modules
+                {"name": m.name, "stage": m.stage, **dict(m.identity())}
+                for m in modules
             ],
         },
     )
@@ -262,7 +265,7 @@ def compose(
     return ComposedImage(spec=spec, layers=(base, runtime))
 
 
-def compose_workspace(
+def compose_workspace(  # noqa: PLR0913 - nine tier inputs, each part of the image digest; bundling them into an object would hide what the hash covers
     *,
     parent: str,
     repository: str,
@@ -274,7 +277,7 @@ def compose_workspace(
     subdirectory: str | None = None,
     clone_as: str | None = None,
 ) -> ComposedLayer:
-    """A third tier holding a repository checkout, built on the runtime image.
+    """Compose a third tier holding a repository checkout, on the runtime image.
 
     This is SWE-bench's *instance* tier, and it is here for the same reason:
     the checkout is the most expensive per-task step and the one most worth
@@ -290,7 +293,7 @@ def compose_workspace(
     ``commit`` must be a resolved revision, not a branch: the digest is only
     honest if the content it names is fixed.
     """
-    staging = "/tmp/jormungandr-clone"
+    staging = "/tmp/jormungandr-clone"  # noqa: S108 - a path inside the image being built, not on the host
     content = f"{staging}/{subdirectory}" if subdirectory else staging
     destination = f"{workdir}/{clone_as}" if clone_as else workdir
 

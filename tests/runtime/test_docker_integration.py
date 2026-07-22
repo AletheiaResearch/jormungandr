@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -140,7 +141,9 @@ class TestRealContainer:
         assert result.exit_code == 124
         assert result.duration < 30
 
-    def test_container_is_removed_after_the_session(self, runtime, docker, built) -> None:
+    def test_container_is_removed_after_the_session(
+        self, runtime, docker, built
+    ) -> None:
         with runtime.session(ContainerSpec(image=built.reference)) as session:
             cid = session.container_id
             assert session.running
@@ -226,7 +229,9 @@ class TestExecResourceSafety:
         assert len(result.stdout) == 4096
         assert result.truncated
         # ru_maxrss is bytes on macOS, KiB on Linux; 512MB dwarfs either scale.
-        growth_mb = (after - before) / (1024 * 1024 if sys.platform == "darwin" else 1024)
+        growth_mb = (after - before) / (
+            1024 * 1024 if sys.platform == "darwin" else 1024
+        )
         assert growth_mb < 100, f"peak RSS grew {growth_mb:.0f}MB draining 512MB"
 
     def test_timeout_does_not_leave_the_command_running(self, runtime, built) -> None:
@@ -275,10 +280,13 @@ class TestPromptRunnerAgainstRealContainers:
                         "chmod +x /usr/local/bin/droid"
                     ),
                 },
-                {"name": "user"}, {"name": "workdir"},
+                {"name": "user"},
+                {"name": "workdir"},
             ],
         )
-        builder = ImageBuilder(state_dir=tmp_path_factory.mktemp("runner"), docker=docker)
+        builder = ImageBuilder(
+            state_dir=tmp_path_factory.mktemp("runner"), docker=docker
+        )
         result = builder.build(spec)
         yield result.reference
         for layer in reversed(result.layers):
@@ -299,11 +307,11 @@ class TestPromptRunnerAgainstRealContainers:
 
     def test_prompt_never_appears_in_argv(self, runner, stub_image, docker) -> None:
         # If the prompt were on argv it would show up in `docker inspect`.
-        secret = "prompt-that-must-not-leak-9f3a"
-        runner.run(harness="droid", image=stub_image, prompts=[secret])
+        canary = "prompt-that-must-not-leak-9f3a"
+        runner.run(harness="droid", image=stub_image, prompts=[canary])
         for container in docker.list_containers():
             blob = json.dumps(container)
-            assert secret not in blob
+            assert canary not in blob
 
     def test_multi_turn_shares_session_state(self, runner, stub_image) -> None:
         # Later turns must see what earlier ones wrote — that is the whole
@@ -387,7 +395,9 @@ image:
         (project / "jorm.yaml").write_text(TestConfigCompilesToAWorkingImage.CONFIG)
         (project / "prompts.jsonl").write_text('{"id":"a","prompt":"hi"}\n')
         config = load_config(project / "jorm.yaml", apply_env=False)
-        builder = ImageBuilder(state_dir=tmp_path_factory.mktemp("state"), docker=docker)
+        builder = ImageBuilder(
+            state_dir=tmp_path_factory.mktemp("state"), docker=docker
+        )
         result = builder.build(compile_image_spec(config))
         yield result
         for layer in reversed(result.layers):
@@ -419,7 +429,9 @@ image:
             listing = session.shell(
                 "FACTORY_AIRGAP_ENABLED=true droid exec -m bogus x 2>&1 | head -40"
             ).stdout
-            baked = json.loads(session.shell('cat "$HOME/.factory/settings.json"').stdout)
+            baked = json.loads(
+                session.shell('cat "$HOME/.factory/settings.json"').stdout
+            )
         expected = baked["sessionDefaultSettings"]["model"]
         assert expected in listing, f"droid does not know {expected}\n{listing}"
 
@@ -456,7 +468,8 @@ class TestExecuteEndToEnd:
     @staticmethod
     def project(tmp_path: Path):
         install_stub = (
-            "printf %s " + shlex.quote(TestExecuteEndToEnd.STUB)
+            "printf %s "
+            + shlex.quote(TestExecuteEndToEnd.STUB)
             + " > /usr/local/bin/droid && chmod +x /usr/local/bin/droid"
         )
         config = {
@@ -501,7 +514,9 @@ class TestExecuteEndToEnd:
 
         config = load_config(project / "jorm.yaml", apply_env=False)
         composed = compose(compile_image_spec(config))
-        builder = ImageBuilder(state_dir=tmp_path_factory.mktemp("state"), docker=docker)
+        builder = ImageBuilder(
+            state_dir=tmp_path_factory.mktemp("state"), docker=docker
+        )
         runner = PromptRunner(
             runtime=ContainerRuntime(docker=docker, install_handlers=False)
         )
@@ -579,13 +594,14 @@ class TestPruneDoesNotEatDerivedImages:
 
         context = tmp_path / "derived"
         context.mkdir()
-        (context / "Dockerfile").write_text(
-            f"FROM {built.reference}\nRUN true\n"
-        )
+        (context / "Dockerfile").write_text(f"FROM {built.reference}\nRUN true\n")
         derived = "mycompany-precious/app:v1"
         subprocess.run(
             ["docker", "build", "-q", "-t", derived, str(context)],
-            check=True, capture_output=True, text=True, timeout=600,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=600,
         )
         try:
             # The label really is inherited — otherwise this test proves nothing.
@@ -599,7 +615,8 @@ class TestPruneDoesNotEatDerivedImages:
             # ...but managed_images must not claim it, because its inherited
             # digest label cannot match the digest in its own tag.
             ours = {
-                f"{i.get('Repository')}:{i.get('Tag')}" for i in builder.managed_images()
+                f"{i.get('Repository')}:{i.get('Tag')}"
+                for i in builder.managed_images()
             }
             assert derived not in ours
             assert built.reference in ours
@@ -628,7 +645,10 @@ class TestPruneDoesNotEatDerivedImages:
         name = f"jorm-user-owned-{uuid.uuid4().hex[:8]}"
         subprocess.run(
             ["docker", "create", "--name", name, built.reference, "sleep", "5"],
-            check=True, capture_output=True, text=True, timeout=120,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         try:
             runtime = ContainerRuntime(docker=docker, install_handlers=False)
@@ -661,7 +681,9 @@ class TestWorkspaceImageTier:
         for layer in reversed(composed.layers):
             docker.remove_image(layer.reference, force=True)
 
-    def test_a_public_repo_is_cloned_into_the_image(self, runtime_image, docker) -> None:
+    def test_a_public_repo_is_cloned_into_the_image(
+        self, runtime_image, docker
+    ) -> None:
         from jormungandr.execute import resolve_commit
         from jormungandr.runtime.compose import compose_workspace
         from jormungandr.runtime.spec import default_platform
@@ -670,16 +692,22 @@ class TestWorkspaceImageTier:
         url = "https://github.com/octocat/Hello-World"
         commit = resolve_commit(url, "master")
         layer = compose_workspace(
-            parent=parent, repository="jormungandr-wstier", clone_url=url,
-            commit=commit, platform=default_platform(),
-            workdir="/workspace", user="agent",
+            parent=parent,
+            repository="jormungandr-wstier",
+            clone_url=url,
+            commit=commit,
+            platform=default_platform(),
+            workdir="/workspace",
+            user="agent",
         )
         built = builder.build_layer(layer, platform=default_platform())
         try:
             runtime = ContainerRuntime(docker=docker, install_handlers=False)
             with runtime.session(ContainerSpec(image=built.reference)) as session:
                 listing = session.shell("ls -a /workspace; id -un; pwd")
-                head = session.shell("git -C /workspace rev-parse HEAD 2>/dev/null || true")
+                head = session.shell(
+                    "git -C /workspace rev-parse HEAD 2>/dev/null || true"
+                )
             assert "README" in listing.stdout
             # ...and it belongs to the agent, in the working directory
             assert "agent" in listing.stdout
@@ -702,9 +730,13 @@ class TestWorkspaceImageTier:
         url = "https://github.com/octocat/Hello-World"
         commit = resolve_commit(url, "master")
         layer = compose_workspace(
-            parent=parent, repository="jormungandr-wstier", clone_url=url,
-            commit=commit, platform=default_platform(),
-            workdir="/workspace", user="agent",
+            parent=parent,
+            repository="jormungandr-wstier",
+            clone_url=url,
+            commit=commit,
+            platform=default_platform(),
+            workdir="/workspace",
+            user="agent",
         )
         first = builder.build_layer(layer, platform=default_platform())
         try:
@@ -735,14 +767,21 @@ class TestWorkspaceImageTier:
         run("git", "commit", "--quiet", "-m", "x")
         sha = subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
 
         builder, parent = runtime_image
         layer = compose_workspace(
-            parent=parent, repository="jormungandr-wstier", clone_url=str(repo),
-            commit=sha, platform=default_platform(),
-            workdir="/workspace", user="agent", subdirectory="pkg",
+            parent=parent,
+            repository="jormungandr-wstier",
+            clone_url=str(repo),
+            commit=sha,
+            platform=default_platform(),
+            workdir="/workspace",
+            user="agent",
+            subdirectory="pkg",
         )
         built = None
         try:
@@ -753,7 +792,7 @@ class TestWorkspaceImageTier:
             # /etc of the *image*, not the host — alpine's, and the host's
             # /etc content is not what a container /etc looks like.
             assert "alpine-release" in got or got.strip() != ""
-        except Exception:
+        except Exception:  # noqa: S110 - a build failure is one of the two safe outcomes this asserts
             # A repo whose subdirectory is a symlink may simply fail to build;
             # either outcome is safe, which is the point.
             pass

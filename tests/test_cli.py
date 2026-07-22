@@ -30,8 +30,7 @@ CONFIG = {
 def project(tmp_path: Path) -> Path:
     (tmp_path / "jorm.yaml").write_text(json.dumps(CONFIG))
     (tmp_path / "prompts.jsonl").write_text(
-        '{"id":"a","prompt":"x"}\n'
-        '{"id":"b","prompt":"y","follow_up_prompts":["z"]}\n'
+        '{"id":"a","prompt":"x"}\n{"id":"b","prompt":"y","follow_up_prompts":["z"]}\n'
     )
     return tmp_path
 
@@ -46,6 +45,7 @@ def cli(*args: str, cwd: Path | None = None, env: dict | None = None):
         timeout=180,
         cwd=str(cwd) if cwd else None,
         env={**os.environ, **(env or {})},
+        check=False,  # every caller asserts on returncode itself
     )
 
 
@@ -71,7 +71,11 @@ class TestHelp:
             "and ('runtime' in m or m.endswith('execute'))))"
         )
         out = subprocess.run(
-            [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
         ).stdout
         assert out.strip() == "[]", f"eagerly imported: {out.strip()}"
 
@@ -85,7 +89,11 @@ class TestHelp:
             "raise ExecutionError('boom')"
         )
         result = subprocess.run(
-            [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
         )
         assert result.returncode == 1
         assert "error: boom" in result.stderr
@@ -111,6 +119,7 @@ class TestCheck:
             timeout=180,
             cwd=str(project),
             env=env,
+            check=False,
         )
         assert result.returncode == 1
         assert "STUB_API_KEY" in result.stderr
@@ -129,6 +138,7 @@ class TestCheck:
             timeout=180,
             cwd=str(project),
             env=env,
+            check=False,
         )
         assert result.returncode == 0, result.stderr
 
@@ -247,7 +257,8 @@ class TestRunAgainstDocker:
                     {"name": "node", "preinstalled": True},
                     {
                         "name": "script",
-                        "content": "printf %s " + shlex.quote(stub)
+                        "content": "printf %s "
+                        + shlex.quote(stub)
                         + " > /usr/local/bin/droid && chmod +x /usr/local/bin/droid",
                     },
                 ],
@@ -269,7 +280,9 @@ class TestRunAgainstDocker:
         from jormungandr.runtime.compose import compose
         from jormungandr.runtime.docker import DockerCli
 
-        composed = compose(compile_image_spec(load_config(project / "jorm.yaml", apply_env=False)))
+        composed = compose(
+            compile_image_spec(load_config(project / "jorm.yaml", apply_env=False))
+        )
         docker = DockerCli()
         for layer in reversed(composed.layers):
             docker.remove_image(layer.reference, force=True)
@@ -297,7 +310,12 @@ class TestRunAgainstDocker:
     def test_limit_runs_only_the_first_records(self, project: Path) -> None:
         try:
             result = cli(
-                "run", "jorm.yaml", "--limit", "2", cwd=project, env={"STUB_API_KEY": "x"}
+                "run",
+                "jorm.yaml",
+                "--limit",
+                "2",
+                cwd=project,
+                env={"STUB_API_KEY": "x"},
             )
             # alpha and beta both pass, so a limited run succeeds
             assert result.returncode == 0, result.stdout + result.stderr
@@ -310,7 +328,14 @@ class TestRunAgainstDocker:
         # Internal INFO logs carry a level and logger name that only add noise
         # beside the progress the command prints itself.
         try:
-            result = cli("run", "jorm.yaml", "--limit", "1", cwd=project, env={"STUB_API_KEY": "x"})
+            result = cli(
+                "run",
+                "jorm.yaml",
+                "--limit",
+                "1",
+                cwd=project,
+                env={"STUB_API_KEY": "x"},
+            )
             assert "INFO" not in result.stderr
         finally:
             self._cleanup(project)

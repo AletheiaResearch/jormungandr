@@ -8,7 +8,6 @@ from pydantic import ValidationError
 
 from jormungandr.config import (
     ConfigError,
-    JormConfig,
     ProviderSpec,
     compile_image_spec,
     load_config,
@@ -49,11 +48,15 @@ def project(tmp_path: Path) -> Path:
 class TestProviderSpec:
     def test_api_key_must_be_an_env_reference(self) -> None:
         with pytest.raises(ValidationError, match="environment reference"):
-            ProviderSpec(base_url="https://x/v1", api_key="sk-ant-real", models={"a": "b"})
+            ProviderSpec(
+                base_url="https://x/v1", api_key="sk-ant-real", models={"a": "b"}
+            )
 
     def test_literal_credential_is_called_out(self) -> None:
         with pytest.raises(ValidationError, match="literal credential"):
-            ProviderSpec(base_url="https://x/v1", api_key="sk-or-abc", models={"a": "b"})
+            ProviderSpec(
+                base_url="https://x/v1", api_key="sk-or-abc", models={"a": "b"}
+            )
 
     def test_env_reference_is_accepted(self) -> None:
         spec = ProviderSpec(
@@ -75,7 +78,10 @@ class TestProviderSpec:
 class TestModelRef:
     def test_splits_on_first_slash_only(self) -> None:
         # A model alias may itself contain slashes.
-        assert parse_model_ref("openrouter/deepseek/v4") == ("openrouter", "deepseek/v4")
+        assert parse_model_ref("openrouter/deepseek/v4") == (
+            "openrouter",
+            "deepseek/v4",
+        )
 
     def test_missing_slash_rejected(self) -> None:
         with pytest.raises(ValueError, match="expected '<provider>/<model>'"):
@@ -88,7 +94,9 @@ class TestJormConfig:
         assert config.harness.name == "droid"
         assert config.harness.settings == {"airgap": True}
 
-    def test_paths_resolve_against_the_config_file(self, project: Path, tmp_path) -> None:
+    def test_paths_resolve_against_the_config_file(
+        self, project: Path, tmp_path
+    ) -> None:
         # Not the process CWD — running with a config from elsewhere must not
         # read and write in the wrong place.
         config = load_config(project / "jorm.yaml", apply_env=False)
@@ -116,7 +124,7 @@ class TestJormConfig:
                 "  droid:\n    airgap: true\n  opencode:\n    agent: build\n",
             )
         )
-        with pytest.raises(ConfigError, match="harness.opencode is set"):
+        with pytest.raises(ConfigError, match=r"harness\.opencode is set"):
             load_config(project / "jorm.yaml", apply_env=False)
 
     def test_unknown_top_level_key_rejected(self, project: Path) -> None:
@@ -230,7 +238,9 @@ class TestPromptRecords:
             PromptRecord(prompt="x", workspace={"type": "local", "path": "/src"})
 
     def test_overrides_are_namespaced(self) -> None:
-        assert PromptRecord(prompt="x", overrides={"timeout": 60}).overrides.timeout == 60
+        assert (
+            PromptRecord(prompt="x", overrides={"timeout": 60}).overrides.timeout == 60
+        )
 
     def test_no_per_record_model_override(self) -> None:
         with pytest.raises(ValidationError):
@@ -246,8 +256,7 @@ class TestLoadPrompts:
     def test_reads_a_teich_file(self, tmp_path: Path) -> None:
         path = self.write(
             tmp_path,
-            '{"prompt":"x"}\n'
-            '{"prompt":"y","follow_up_prompts":["z"]}\n',
+            '{"prompt":"x"}\n{"prompt":"y","follow_up_prompts":["z"]}\n',
         )
         records = load_prompts(path)
         assert [r.prompt for r in records] == ["x", "y"]
@@ -283,7 +292,9 @@ class TestLoadPrompts:
 
     def test_duplicate_ids_rejected(self, tmp_path: Path) -> None:
         # Ids name output directories, so a collision would overwrite results.
-        path = self.write(tmp_path, '{"id":"a","prompt":"x"}\n{"id":"a","prompt":"y"}\n')
+        path = self.write(
+            tmp_path, '{"id":"a","prompt":"x"}\n{"id":"a","prompt":"y"}\n'
+        )
         with pytest.raises(ValueError, match="duplicate id"):
             load_prompts(path)
 
@@ -292,9 +303,7 @@ class TestLoadPrompts:
             load_prompts(self.write(tmp_path, "\n\n"))
 
     def test_limit_is_applied(self, project: Path) -> None:
-        (project / "prompts.jsonl").write_text(
-            '{"prompt":"x"}\n{"prompt":"y"}\n'
-        )
+        (project / "prompts.jsonl").write_text('{"prompt":"x"}\n{"prompt":"y"}\n')
         (project / "jorm.yaml").write_text(BASE_CONFIG + "  limit: 1\n")
         config = load_config(project / "jorm.yaml", apply_env=False)
         assert len(resolve_prompts(config)) == 1
@@ -302,7 +311,9 @@ class TestLoadPrompts:
 
 class TestCompileToImageSpec:
     def compiled(self, project: Path):
-        return compose(compile_image_spec(load_config(project / "jorm.yaml", apply_env=False)))
+        return compose(
+            compile_image_spec(load_config(project / "jorm.yaml", apply_env=False))
+        )
 
     def test_user_module_precedes_the_harness(self, project: Path) -> None:
         # HOME must exist before the harness bakes config into it.
@@ -327,12 +338,16 @@ class TestCompileToImageSpec:
         # droid's own syntax
         assert model["apiKey"] == "${OPENROUTER_API_KEY}"
         # --model rejects custom ids, so selection goes through the defaults
-        assert document["sessionDefaultSettings"]["model"] == "custom:openrouter-deepseek-0"
+        assert (
+            document["sessionDefaultSettings"]["model"]
+            == "custom:openrouter-deepseek-0"
+        )
 
     def test_opencode_config_is_baked_in_its_own_shape(self, project: Path) -> None:
         (project / "jorm.yaml").write_text(
-            BASE_CONFIG.replace("name: droid", "name: opencode")
-            .replace("  droid:\n    airgap: true\n", "")
+            BASE_CONFIG.replace("name: droid", "name: opencode").replace(
+                "  droid:\n    airgap: true\n", ""
+            )
         )
         result = self.compiled(project)
         document = json.loads(result.runtime.context_files["opencode.config.json"])
@@ -342,14 +357,20 @@ class TestCompileToImageSpec:
         # opencode's own syntax — ${VAR} does not work for apiKey here
         assert provider["options"]["apiKey"] == "{env:OPENROUTER_API_KEY}"
         # custom models need explicit limits or context accounting breaks
-        assert provider["models"]["deepseek/deepseek-v4-flash"]["limit"]["context"] == 128000
+        assert (
+            provider["models"]["deepseek/deepseek-v4-flash"]["limit"]["context"]
+            == 128000
+        )
         assert document["model"] == "openrouter/deepseek/deepseek-v4-flash"
 
-    def test_the_same_config_yields_different_native_shapes(self, project: Path) -> None:
+    def test_the_same_config_yields_different_native_shapes(
+        self, project: Path
+    ) -> None:
         droid = self.compiled(project).runtime.context_files["droid.config.json"]
         (project / "jorm.yaml").write_text(
-            BASE_CONFIG.replace("name: droid", "name: opencode")
-            .replace("  droid:\n    airgap: true\n", "")
+            BASE_CONFIG.replace("name: droid", "name: opencode").replace(
+                "  droid:\n    airgap: true\n", ""
+            )
         )
         opencode = self.compiled(project).runtime.context_files["opencode.config.json"]
         assert droid != opencode
@@ -359,11 +380,15 @@ class TestCompileToImageSpec:
     def test_provider_change_is_part_of_the_digest(self, project: Path) -> None:
         before = self.compiled(project).runtime.digest
         (project / "jorm.yaml").write_text(
-            BASE_CONFIG.replace("https://openrouter.ai/api/v1", "https://other.example/v1")
+            BASE_CONFIG.replace(
+                "https://openrouter.ai/api/v1", "https://other.example/v1"
+            )
         )
         assert self.compiled(project).runtime.digest != before
 
-    def test_a_field_the_harness_ignores_does_not_rebuild_it(self, project: Path) -> None:
+    def test_a_field_the_harness_ignores_does_not_rebuild_it(
+        self, project: Path
+    ) -> None:
         # context_window feeds OpenCode's limit.context; droid has no
         # equivalent, so a droid image legitimately does not change. The digest
         # tracks what is in the image, not what is in the config file.
@@ -403,7 +428,7 @@ class TestCompileToImageSpec:
         (project / "jorm.yaml").write_text(
             BASE_CONFIG.replace("    airgap: true", "    airgapp: true")
         )
-        with pytest.raises(Exception):
+        with pytest.raises(TypeError, match="airgapp"):
             self.compiled(project)
 
 
@@ -466,6 +491,12 @@ class TestTeichFormatCompatibility:
         assert invocation_for("opencode").system_via == "agents_md"
 
 
+# Real urls, not placeholders: clone_url is validated, because it reaches
+# `git ls-remote` as an argument vector and a `RUN` line as shell text.
+URL = "https://git.example.com/team/mono.git"
+OTHER_URL = "https://git.example.com/team/other.git"
+
+
 class TestGitSource:
     """The richer form: everything github_repo cannot express."""
 
@@ -486,7 +517,9 @@ class TestGitSource:
         assert source.clone_as == "api"
 
     def test_non_github_hosts_work(self) -> None:
-        record = PromptRecord(prompt="x", git={"clone_url": "https://gitlab.com/a/b.git"})
+        record = PromptRecord(
+            prompt="x", git={"clone_url": "https://gitlab.com/a/b.git"}
+        )
         assert record.workspace.git.clone_url == "https://gitlab.com/a/b.git"
 
     def test_clone_url_is_required(self) -> None:
@@ -495,9 +528,9 @@ class TestGitSource:
 
     def test_a_subtree_has_no_history(self) -> None:
         # Inherent to taking a subtree, not an implementation limit.
-        whole = PromptRecord(prompt="x", git={"clone_url": "u"}).workspace.git
+        whole = PromptRecord(prompt="x", git={"clone_url": URL}).workspace.git
         part = PromptRecord(
-            prompt="x", git={"clone_url": "u", "subdirectory": "pkg"}
+            prompt="x", git={"clone_url": URL, "subdirectory": "pkg"}
         ).workspace.git
         assert whole.has_history and not part.has_history
 
@@ -505,14 +538,14 @@ class TestGitSource:
         # They describe the same thing at different detail levels; accepting
         # both would mean silently picking a winner.
         with pytest.raises(ValidationError, match="only one workspace source"):
-            PromptRecord(prompt="x", github_repo="a/b", git={"clone_url": "u"})
+            PromptRecord(prompt="x", github_repo="a/b", git={"clone_url": URL})
 
     def test_git_and_an_explicit_workspace_are_exclusive(self) -> None:
         with pytest.raises(ValidationError, match="only one workspace source"):
             PromptRecord(
                 prompt="x",
-                git={"clone_url": "u"},
-                workspace={"type": "git", "git": {"clone_url": "other"}},
+                git={"clone_url": URL},
+                workspace={"type": "git", "git": {"clone_url": OTHER_URL}},
             )
 
     def test_github_repo_and_an_explicit_workspace_are_exclusive(self) -> None:
@@ -520,7 +553,7 @@ class TestGitSource:
             PromptRecord(
                 prompt="x",
                 github_repo="a/b",
-                workspace={"type": "git", "git": {"clone_url": "other"}},
+                workspace={"type": "git", "git": {"clone_url": OTHER_URL}},
             )
 
     def test_an_explicit_none_workspace_is_not_a_conflict(self) -> None:
@@ -532,21 +565,64 @@ class TestGitSource:
         # A prompt file is data; it must not be able to write outside the run's
         # output directory. `..` is the only segment that can actually escape.
         with pytest.raises(ValidationError, match=r"\.\."):
-            PromptRecord(prompt="x", git={"clone_url": "u", "subdirectory": bad})
+            PromptRecord(prompt="x", git={"clone_url": URL, "subdirectory": bad})
         with pytest.raises(ValidationError, match=r"\.\."):
-            PromptRecord(prompt="x", git={"clone_url": "u", "clone_as": bad})
+            PromptRecord(prompt="x", git={"clone_url": URL, "clone_as": bad})
 
     def test_surrounding_slashes_are_trimmed_not_rejected(self) -> None:
         # These are always joined below the workspace root, so a leading slash
         # is sloppiness rather than an absolute path.
         record = PromptRecord(
-            prompt="x", git={"clone_url": "u", "subdirectory": "/pkg/api/"}
+            prompt="x", git={"clone_url": URL, "subdirectory": "/pkg/api/"}
         )
         assert record.workspace.git.subdirectory == "pkg/api"
 
     def test_unknown_git_key_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            PromptRecord(prompt="x", git={"clone_url": "u", "branch": "main"})
+            PromptRecord(prompt="x", git={"clone_url": URL, "branch": "main"})
+
+    @pytest.mark.parametrize(
+        "good",
+        [
+            "https://github.com/acme/app",
+            "https://github.com/acme/app.git",
+            "http://git.internal/acme/app.git",
+            "git://git.kernel.org/pub/scm/git/git.git",
+            "ssh://git@git.example.com:2222/team/mono.git",
+            "git@git.example.com:team/mono.git",
+            "https://user:token@git.example.com/team/mono.git",
+        ],
+    )
+    def test_real_git_urls_are_accepted(self, good: str) -> None:
+        record = PromptRecord(prompt="x", git={"clone_url": good})
+        assert record.workspace.git.clone_url == good
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            # An argument beginning with a dash is an *option* to every git
+            # subcommand, and `--upload-pack=<cmd>` executes <cmd>.
+            "--upload-pack=touch /tmp/pwned",
+            "-u/bin/sh",
+            # `ext::` is a transport that runs a command by design.
+            "ext::sh -c 'touch /tmp/pwned'",
+            # clone_url is interpolated unquoted into a `RUN git remote add
+            # origin <url>` line in the workspace Dockerfile.
+            "https://h/r; touch /tmp/pwned",
+            "https://h/r && touch /tmp/pwned",
+            "https://h/r$(touch /tmp/pwned)",
+            "https://h/r`touch /tmp/pwned`",
+            # No scheme at all: not a git url, and previously accepted.
+            "u",
+            "/etc/passwd",
+            "file:///etc",
+        ],
+    )
+    def test_a_clone_url_that_is_not_a_git_url_is_rejected(self, bad: str) -> None:
+        # A prompts.jsonl is data. Rejecting here names the offending line at
+        # load time instead of handing the string to `git` inside a worker.
+        with pytest.raises(ValidationError, match="clone_url"):
+            PromptRecord(prompt="x", git={"clone_url": bad})
 
 
 class TestRecordIdSafety:
@@ -568,7 +644,9 @@ class TestRecordIdSafety:
     def test_ordinary_ids_are_accepted(self, good: str) -> None:
         assert PromptRecord(prompt="x", id=good).id == good
 
-    def test_an_unsafe_id_in_a_file_is_reported_with_its_line(self, tmp_path: Path) -> None:
+    def test_an_unsafe_id_in_a_file_is_reported_with_its_line(
+        self, tmp_path: Path
+    ) -> None:
         path = tmp_path / "p.jsonl"
         path.write_text('{"prompt":"ok"}\n{"id":"../../boom","prompt":"x"}\n')
         with pytest.raises(ValueError, match="line 2"):
@@ -589,8 +667,10 @@ class TestReviewRegressions:
         # makes it relative to the process CWD, so the same config writes
         # somewhere else depending on where it was invoked.
         (tmp_path / "jorm.yaml").write_text(
-            BASE_CONFIG.replace("prompts:\n  file: ./prompts.jsonl\n",
-                                "prompts:\n  file: ./prompts.jsonl\n")
+            BASE_CONFIG.replace(
+                "prompts:\n  file: ./prompts.jsonl\n",
+                "prompts:\n  file: ./prompts.jsonl\n",
+            )
         )
         (tmp_path / "prompts.jsonl").write_text('{"prompt":"x"}\n')
         config = load_config(tmp_path / "jorm.yaml", apply_env=False)
@@ -617,12 +697,12 @@ class TestReviewRegressions:
 
     def test_a_literal_credential_is_not_echoed_in_the_message(self) -> None:
         # Reporting a leaked key must not print the key.
-        secret = "sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789"
+        leaked_key = "sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789"
         with pytest.raises(ValidationError) as excinfo:
-            ProviderSpec(base_url="https://h/v1", api_key=secret, models={"a": "b"})
+            ProviderSpec(base_url="https://h/v1", api_key=leaked_key, models={"a": "b"})
         message = str(excinfo.value)
         # pydantic echoes the input separately; our own text must not add it.
-        assert "abcdefghijklmnop" not in message.split("input_value")[0]
+        assert "abcdefghijklmnop" not in message.split("input_value", maxsplit=1)[0]
 
     def test_opencode_limits_are_emitted_without_context_window(self) -> None:
         # The schema requires both keys, so a partial limit is invalid — but

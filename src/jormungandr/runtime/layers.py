@@ -17,7 +17,7 @@ validated contract lives in :mod:`jormungandr.runtime.spec`.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 __all__ = [
@@ -56,7 +56,7 @@ class Instruction(Protocol):
 
 
 def _check_single_line(value: str, *, what: str) -> str:
-    """Reject embedded newlines.
+    r"""Reject embedded newlines.
 
     Every instruction here is line-oriented, so a newline in a value does not
     escape a string — it ends the instruction and starts a new one. A package
@@ -209,7 +209,9 @@ class Arg:
         name = _check_single_line(self.name, what="ARG name")
         if self.default is None:
             return f"ARG {name}"
-        return f"ARG {name}={_quote(_check_single_line(self.default, what='ARG default'))}"
+        return (
+            f"ARG {name}={_quote(_check_single_line(self.default, what='ARG default'))}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,7 +361,9 @@ class Comment:
     text: str
 
     def render(self) -> str:
-        return "\n".join(f"# {line}" if line else "#" for line in self.text.splitlines())
+        return "\n".join(
+            f"# {line}" if line else "#" for line in self.text.splitlines()
+        )
 
 
 @dataclass(frozen=True, slots=True)

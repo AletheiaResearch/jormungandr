@@ -19,16 +19,17 @@ import os
 import re
 import shutil
 import subprocess
+from collections import Counter
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from jormungandr.config.models import JormConfig
 from jormungandr.config.prompts import PromptRecord
-from jormungandr.runtime.invocation import invocation_for
-from jormungandr.runtime.run import HarnessRun, PromptRunner
+from jormungandr.runtime.run import HarnessRun, PromptRunner, TurnResult
 from jormungandr.runtime.spec import ContainerSpec, ResourceLimits
 
 __all__ = [
@@ -51,6 +52,14 @@ class ExecutionError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class RecordResult:
+    """What became of one prompt record.
+
+    ``error`` is set when the record failed before or around the harness —
+    a workspace that would not build, a container that would not start. A
+    harness that ran and exited non-zero leaves ``error`` unset and ``run``
+    populated, because that is a result, not a malfunction.
+    """
+
     id: str
     ok: bool
     run: HarnessRun | None
@@ -58,31 +67,41 @@ class RecordResult:
     error: str | None = None
 
     @property
-    def turns(self) -> tuple:
+    def turns(self) -> tuple[TurnResult, ...]:
+        """Return the harness's turns, or empty if it never ran."""
         return self.run.turns if self.run else ()
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionReport:
+    """The outcome of a whole run: one image, and a result per record."""
+
     image: str
     results: tuple[RecordResult, ...]
     output_dir: Path
 
     @property
     def succeeded(self) -> tuple[RecordResult, ...]:
+        """Return the records that completed without error."""
         return tuple(r for r in self.results if r.ok)
 
     @property
     def failed(self) -> tuple[RecordResult, ...]:
+        """Return the records that did not."""
         return tuple(r for r in self.results if not r.ok)
 
     @property
     def ok(self) -> bool:
+        """Report whether every record succeeded.
+
+        This is what the CLI's exit status is derived from, so a single failed
+        record makes the whole run non-zero.
+        """
         return not self.failed
 
 
 def user_of(config: JormConfig) -> str:
-    """The account the agent runs as, per the ``user`` module."""
+    """Name the account the agent runs as, per the ``user`` module."""
     for declaration in config.image.modules:
         if declaration.get("name") == "user":
             return str(declaration.get("user") or DEFAULT_USER)
@@ -110,8 +129,13 @@ def resolve_commit(clone_url: str, ref: str | None) -> str:
         return ref
     target = ref or "HEAD"
     try:
-        proc = subprocess.run(
-            ["git", "ls-remote", clone_url, target],
+        proc = subprocess.run(  # noqa: S603 - argv is fixed; `--` and GitSource.clone_url's validator stop clone_url being read as an option
+            # `--` is load-bearing: both operands come from prompts.jsonl, and
+            # without it a clone_url of `--upload-pack=<cmd>` is parsed as an
+            # option rather than a repository — which runs <cmd> on this host.
+            # GitSource rejects such a url too; this is the half that does not
+            # depend on the value having gone through the model.
+            ["git", "ls-remote", "--", clone_url, target],
             capture_output=True,
             text=True,
             timeout=120,
@@ -157,13 +181,14 @@ def _container_spec(config: JormConfig, image: str) -> ContainerSpec:
         env=dict(config.run.env),
         env_files=tuple(str(p) for p in config.run.env_files),
         mounts=tuple(config.run.mounts),
-        network=config.run.network,  # type: ignore[arg-type]
+        network=config.run.network,
         limits=ResourceLimits(cpus=config.run.cpus, memory=config.run.memory),
     )
 
 
-def _write_result(directory: Path, record: PromptRecord, run: HarnessRun | None,
-                  error: str | None) -> None:
+def _write_result(
+    directory: Path, record: PromptRecord, run: HarnessRun | None, error: str | None
+) -> None:
     """Persist the record's outcome as JSON plus raw per-turn output.
 
     stdout and stderr go to their own files rather than into the JSON: harness
@@ -208,7 +233,7 @@ def _image_for(
     directory: Path,
     platform: str,
 ) -> str:
-    """The image this record runs from.
+    """Choose the image this record runs from.
 
     A record with a repository gets its own workspace tier built on the runtime
     image, so the checkout is cached: a retried run reuses it instead of
@@ -225,7 +250,10 @@ def _image_for(
     commit = resolve_commit(source.clone_url, source.ref)
     if not source.ref:
         log.info(
-            "%s: %s default branch resolved to %s", record.id, source.clone_url, commit[:12]
+            "%s: %s default branch resolved to %s",
+            record.id,
+            source.clone_url,
+            commit[:12],
         )
     layer = compose_workspace(
         parent=runtime_image,
@@ -242,7 +270,10 @@ def _image_for(
     (directory / "workspace-image.txt").write_text(
         f"{result.reference}\n{source.clone_url}@{commit}\n", encoding="utf-8"
     )
-    return result.reference
+    # `builder` is deliberately Any — the tests substitute a fake with no
+    # daemon — so the reference has to be pinned to a type here rather than
+    # inferred from it.
+    return str(result.reference)
 
 
 def _run_one(
@@ -254,6 +285,12 @@ def _run_one(
     builder: Any = None,
     platform: str = "",
 ) -> RecordResult:
+    if record.id is None:
+        # execute() derives an id for every record before submitting it, so
+        # this is unreachable from the public API. Stated rather than assumed:
+        # `output_dir / None` used to raise TypeError inside the worker, and
+        # future.result() re-raised it over the whole run's report.
+        raise ExecutionError("record reached the runner without an id")
     directory = output_dir / record.id
     if directory.exists():
         # Otherwise a re-run leaves last run's turn-*.txt and state/ beside the
@@ -265,7 +302,7 @@ def _run_one(
         # A record with a repository runs from its own workspace image, built
         # on the runtime one, so the checkout is cached across retries.
         image = _image_for(config, image, record, builder, directory, platform)
-    except Exception as exc:  # noqa: BLE001 - one record must not end the run
+    except Exception as exc:  # one record must not end the run
         # Not just ExecutionError: resolving a ref or building the workspace
         # image can raise OSError, a subprocess timeout, or a BuildError, and
         # losing 199 completed records because record 200 hit a full disk is
@@ -290,10 +327,12 @@ def _run_one(
             system=record.system,
             timeout=timeout,
             container_spec=_container_spec(config, image),
-            collect_state_to=directory / "state" if config.output.collect_state else None,
+            collect_state_to=directory / "state"
+            if config.output.collect_state
+            else None,
             workdir=workdir_of(config),
         )
-    except Exception as exc:  # noqa: BLE001 - one record failing must not end the run
+    except Exception as exc:  # one record failing must not end the run
         log.exception("record %s failed to run", record.id)
         _write_result(directory, record, None, str(exc))
         return RecordResult(record.id, False, None, directory, str(exc))
@@ -335,6 +374,33 @@ def execute(
     prompts = tuple(records) if records is not None else resolve_prompts(config)
     if not prompts:
         raise ExecutionError("no prompt records to run")
+
+    # `id` is optional on a record, and load_prompts is the only thing that
+    # ever fills it in — so `records=` supplied by a caller arrives with ids of
+    # None. `output_dir / record.id` then raised TypeError inside a worker and
+    # future.result() re-raised it: every record still ran and paid for its
+    # container, but the run report was never written and the caller got a
+    # TypeError instead of a result. Derived with load_prompts' own scheme, so
+    # a record run this way lands where the file-driven run would have put it.
+    prompts = tuple(
+        record.with_id(f"prompt-{index:04d}") for index, record in enumerate(prompts)
+    )
+
+    # Also checked before any container starts. An id names a directory, and
+    # _run_one rmtree's that directory before writing into it, so two records
+    # sharing one id means the second silently destroys the first's output
+    # while the report calls both of them successful. load_prompts guards a
+    # file; this guards `records=`, which does not go through it — and it has
+    # to run after ids are derived, because a supplied "prompt-0001" can
+    # collide with one derived from position.
+    counts = Counter(str(r.id) for r in prompts)
+    duplicated = sorted(name for name, count in counts.items() if count > 1)
+    if duplicated:
+        listed = ", ".join(repr(name) for name in duplicated)
+        raise ExecutionError(
+            f"duplicate id {listed}. Ids name output directories, so they "
+            "must be unique."
+        )
 
     # Checked before any container starts: a record named "report.json" would
     # otherwise collide with the run report and fail after every record had

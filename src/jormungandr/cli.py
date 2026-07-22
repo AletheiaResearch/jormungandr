@@ -1,5 +1,8 @@
-"""CLI declarations. Stdlib + cyclopts imports only — command bodies
-import their implementations lazily so --help stays fast."""
+"""CLI declarations.
+
+Stdlib and cyclopts imports only. Command bodies import their implementations
+lazily, so ``--help`` does not pay for the compose and container machinery.
+"""
 
 from __future__ import annotations
 
@@ -16,9 +19,9 @@ app = App(
 
 @app.command
 def check(
-    config: Annotated[Path, Parameter(help="Path to a jormungandr config file.")] = Path(
-        "jorm.yaml"
-    ),
+    config: Annotated[
+        Path, Parameter(help="Path to a jormungandr config file.")
+    ] = Path("jorm.yaml"),
 ) -> None:
     """Validate the config and prompts without building or running anything.
 
@@ -62,7 +65,9 @@ def build(
 def run(
     config: Path = Path("jorm.yaml"),
     *,
-    limit: Annotated[int | None, Parameter(help="Run only the first N records.")] = None,
+    limit: Annotated[
+        int | None, Parameter(help="Run only the first N records.")
+    ] = None,
     concurrency: Annotated[
         int | None, Parameter(help="Override run.concurrency.")
     ] = None,
@@ -133,6 +138,11 @@ def _launcher(
 
 
 def main() -> None:
+    """Run the CLI.
+
+    Installs the error handler before dispatching, so a failure surfaces as one
+    line naming the cause rather than a traceback the user cannot act on.
+    """
     from jormungandr.cli_helpers import install_error_handler
 
     install_error_handler()

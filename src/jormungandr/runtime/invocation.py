@@ -20,16 +20,16 @@ they are not equivalent:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 __all__ = [
+    "INVOCATIONS",
     "DroidInvocation",
     "HarnessInvocation",
     "Invocation",
     "OpenCodeInvocation",
-    "INVOCATIONS",
     "invocation_for",
 ]
 
@@ -84,13 +84,19 @@ class OpenCodeInvocation:
     """
 
     harness = "opencode"
-    state_paths = (".local/share/opencode",)
+    # Annotated, not inferred: a bare literal infers as tuple[str], a
+    # fixed-length type that does not satisfy the protocol's tuple[str, ...].
+    state_paths: tuple[str, ...] = (".local/share/opencode",)
     # `opencode run --help` lists no system-prompt flag, so AGENTS.md in the
     # working directory is the only route.
     system_via = "agents_md"
 
     def build(
-        self, prompt: str, *, model: str | None = None, system: str | None = None
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        system: str | None = None,  # noqa: ARG002 - required by the HarnessInvocation protocol; opencode has no system-prompt flag, so system_via="agents_md" carries it instead
     ) -> Invocation:
         argv: list[str] = ["opencode", "run"]
         if model:
@@ -111,7 +117,7 @@ class DroidInvocation:
     """
 
     harness = "droid"
-    state_paths = (".factory/sessions", ".factory/logs")
+    state_paths: tuple[str, ...] = (".factory/sessions", ".factory/logs")
     system_via = "argv"
 
     def __init__(self, *, autonomy: str = "low", output_format: str = "json") -> None:

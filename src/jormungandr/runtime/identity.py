@@ -45,7 +45,9 @@ in practice for this population, and short enough to read in `docker images`."""
 LABEL_NAMESPACE = "dev.jormungandr"
 
 _TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
-_NAME_RE = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$")
+_NAME_RE = re.compile(
+    r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$"
+)
 
 
 def _canonicalize(value: Any) -> Any:

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from jormungandr.config import load_config
 from jormungandr.config.prompts import PromptRecord
@@ -51,8 +52,18 @@ class FakeRunner:
         self.calls: list[dict] = []
         self.fail_ids = fail_ids or set()
 
-    def run(self, *, harness, image, prompts, timeout=None, container_spec=None,
-            collect_state_to=None, workdir=None, **kwargs):
+    def run(
+        self,
+        *,
+        harness,
+        image,
+        prompts,
+        timeout=None,
+        container_spec=None,
+        collect_state_to=None,
+        workdir=None,
+        **kwargs,
+    ):
         self.calls.append(
             {
                 "harness": harness,
@@ -103,7 +114,9 @@ class TestPreflight:
         # bad way to learn a variable is unset.
         builder = FakeBuilder()
         with pytest.raises(ExecutionError, match="OPENROUTER_API_KEY"):
-            execute(load(project), builder=builder, runner=FakeRunner(), available_env=set())
+            execute(
+                load(project), builder=builder, runner=FakeRunner(), available_env=set()
+            )
         assert builder.built == []
 
     def test_env_file_satisfies_the_requirement(self, project: Path) -> None:
@@ -113,7 +126,10 @@ class TestPreflight:
             CONFIG.replace("output:", f"run:\n  env_files: [{secrets}]\noutput:")
         )
         report = execute(
-            load(project), builder=FakeBuilder(), runner=FakeRunner(), available_env=set()
+            load(project),
+            builder=FakeBuilder(),
+            runner=FakeRunner(),
+            available_env=set(),
         )
         assert report.ok
 
@@ -264,7 +280,7 @@ class TestOverrides:
     def test_no_per_record_model_override_exists(self) -> None:
         # Model selection is baked into the image, so varying it per record
         # would mean an image per record. Compare models by running twice.
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError, match="model"):
             PromptRecord(id="w", prompt="x", overrides={"model": "other/model"})
 
 
@@ -312,9 +328,13 @@ class TestGitWorkspacesBecomeAnImage:
         from jormungandr.runtime.compose import compose_workspace
 
         other = compose_workspace(
-            parent="demo:runtime-abc", repository="demo",
-            clone_url="https://github.com/a/b", commit="e" * 40,
-            platform="linux/arm64", workdir="/workspace", user="agent",
+            parent="demo:runtime-abc",
+            repository="demo",
+            clone_url="https://github.com/a/b",
+            commit="e" * 40,
+            platform="linux/arm64",
+            workdir="/workspace",
+            user="agent",
         )
         assert other.digest != self.compose_for().digest
 
@@ -322,9 +342,13 @@ class TestGitWorkspacesBecomeAnImage:
         from jormungandr.runtime.compose import compose_workspace
 
         other = compose_workspace(
-            parent="demo:runtime-CHANGED", repository="demo",
-            clone_url="https://github.com/a/b", commit="d" * 40,
-            platform="linux/arm64", workdir="/workspace", user="agent",
+            parent="demo:runtime-CHANGED",
+            repository="demo",
+            clone_url="https://github.com/a/b",
+            commit="d" * 40,
+            platform="linux/arm64",
+            workdir="/workspace",
+            user="agent",
         )
         assert other.digest != self.compose_for().digest
 
@@ -338,8 +362,10 @@ class TestGitWorkspacesBecomeAnImage:
 
     def test_it_ends_as_the_unprivileged_user(self) -> None:
         layer = self.compose_for(user="runner")
-        lines = [l for l in layer.dockerfile.splitlines() if l.startswith("USER")]
-        assert lines[0] == "USER root"   # cloning and chown need it
+        lines = [
+            line for line in layer.dockerfile.splitlines() if line.startswith("USER")
+        ]
+        assert lines[0] == "USER root"  # cloning and chown need it
         assert lines[-1] == "USER runner"
 
     def test_git_is_installed_if_absent(self) -> None:
@@ -387,7 +413,9 @@ class TestGitWorkspacesBecomeAnImage:
         # the container runs from the workspace image, not the runtime one
         assert runner.calls[0]["image"].startswith("demo:workspace-")
 
-    def test_a_record_without_a_repo_uses_the_runtime_image(self, project: Path) -> None:
+    def test_a_record_without_a_repo_uses_the_runtime_image(
+        self, project: Path
+    ) -> None:
         runner = FakeRunner()
         execute(
             load(project),
@@ -409,8 +437,33 @@ class TestRefResolution:
     def test_an_unresolvable_repo_is_a_clear_error(self) -> None:
         from jormungandr.execute import ExecutionError, resolve_commit
 
-        with pytest.raises(ExecutionError, match="could not resolve|timed out"):
+        with pytest.raises(ExecutionError, match=r"could not resolve|timed out"):
             resolve_commit("https://github.invalid/nope/nope", "main")
+
+    def test_a_clone_url_cannot_become_a_git_option(self, tmp_path: Path) -> None:
+        # `git ls-remote <url> <ref>` with no `--` lets a url beginning with a
+        # dash be parsed as an option, and `--upload-pack=<cmd>` executes <cmd>
+        # on the host. clone_url comes straight out of prompts.jsonl.
+        #
+        # The assertion is the side effect, not the message: git exits non-zero
+        # either way, so only the absence of the file proves nothing ran.
+        from jormungandr.execute import ExecutionError, resolve_commit
+
+        sentinel = tmp_path / "pwned.txt"
+        # `sh -c '...'` rather than a bare `touch`: git appends the repository
+        # name to the upload-pack command, so a bare touch also creates a file
+        # called HEAD in the working directory. Here it lands harmlessly in $0.
+        payload = f"--upload-pack=sh -c 'touch {sentinel}'"
+        resolve_commit.cache_clear()
+        try:
+            with pytest.raises(ExecutionError):
+                resolve_commit(payload, None)
+        finally:
+            resolve_commit.cache_clear()
+
+        assert not sentinel.exists(), (
+            f"git executed the injected command: {sentinel} was created"
+        )
 
 
 class TestReviewRegressions:
@@ -474,7 +527,10 @@ class TestReviewRegressions:
         execute_module._image_for = explode
         try:
             report = execute(
-                load(project), builder=FakeBuilder(), runner=FakeRunner(), available_env=ENV
+                load(project),
+                builder=FakeBuilder(),
+                runner=FakeRunner(),
+                available_env=ENV,
             )
         finally:
             execute_module._image_for = original
@@ -495,7 +551,9 @@ class TestReviewRegressions:
         )
         assert not (second.results[0].directory / "turn-9.stdout.txt").exists()
 
-    def test_a_reserved_record_id_is_refused_before_running(self, project: Path) -> None:
+    def test_a_reserved_record_id_is_refused_before_running(
+        self, project: Path
+    ) -> None:
         # Otherwise it collides with the run report and fails after every
         # container has already run.
         runner = FakeRunner()
@@ -535,7 +593,9 @@ class TestReviewRegressions:
             )
         )
         runner = FakeRunner()
-        execute(load(project), builder=FakeBuilder(), runner=runner, available_env=set())
+        execute(
+            load(project), builder=FakeBuilder(), runner=runner, available_env=set()
+        )
         spec = runner.calls[0]["spec"]
         assert spec.env["LANGFUSE_HOST"] == "https://h"
         assert spec.env_files and spec.env_files[0].endswith("secrets.env")
@@ -603,3 +663,122 @@ class TestFinalPatches:
             "r:runtime-bbb",
             "r:base-aaa",
         ]
+
+
+class TestRecordsWithoutIds:
+    """`id` is optional on PromptRecord, and `execute(records=...)` skips
+    `load_prompts`, which is the only thing that ever fills it in."""
+
+    def test_a_record_without_an_id_still_runs(self, project: Path) -> None:
+        runner = FakeRunner()
+        report = execute(
+            load(project),
+            records=[PromptRecord(prompt="x")],
+            builder=FakeBuilder(),
+            runner=runner,
+            available_env=ENV,
+        )
+        assert report.ok
+        assert runner.calls[0]["prompts"] == ["x"]
+        assert report.results[0].id == "prompt-0000"
+        assert report.results[0].directory.name == "prompt-0000"
+
+    def test_one_record_without_an_id_does_not_lose_the_report(
+        self, project: Path
+    ) -> None:
+        # The failure this guards: `output_dir / record.id` raised TypeError in
+        # a worker and `future.result()` re-raised it. Every container still
+        # ran and still billed, but the run-level report.json was never
+        # written and the caller got a TypeError instead of a result.
+        runner = FakeRunner()
+        report = execute(
+            load(project),
+            records=[
+                PromptRecord(id="keeper", prompt="kept"),
+                PromptRecord(prompt="x"),
+            ],
+            builder=FakeBuilder(),
+            runner=runner,
+            available_env=ENV,
+        )
+        assert [r.id for r in report.results] == ["keeper", "prompt-0001"]
+        assert report.ok
+        payload = json.loads((report.output_dir / "report.json").read_text())
+        assert sorted(payload["succeeded"]) == ["keeper", "prompt-0001"]
+
+    def test_ids_derived_here_match_the_ones_load_prompts_derives(
+        self, project: Path
+    ) -> None:
+        # Same scheme as config/prompts.py, so a record run through
+        # `execute(records=...)` lands in the directory the file-driven run
+        # would have used.
+        report = execute(
+            load(project),
+            records=[PromptRecord(prompt="one"), PromptRecord(prompt="two")],
+            builder=FakeBuilder(),
+            runner=FakeRunner(),
+            available_env=ENV,
+        )
+        assert [r.id for r in report.results] == ["prompt-0000", "prompt-0001"]
+
+    def test_a_supplied_id_is_never_overwritten(self, project: Path) -> None:
+        report = execute(
+            load(project),
+            records=[
+                PromptRecord(prompt="one"),
+                PromptRecord(id="mine", prompt="two"),
+            ],
+            builder=FakeBuilder(),
+            runner=FakeRunner(),
+            available_env=ENV,
+        )
+        assert [r.id for r in report.results] == ["prompt-0000", "mine"]
+
+    def test_duplicate_ids_are_refused(self, project: Path) -> None:
+        # Ids name output directories, and _run_one rmtree's the directory
+        # before writing. Two records sharing an id therefore share one
+        # directory and the second destroys the first's output — silently,
+        # with both reported as succeeded. load_prompts already guards this;
+        # execute() did not, so passing records= bypassed the guard.
+        with pytest.raises(ExecutionError, match="duplicate id 'a'"):
+            execute(
+                load(project),
+                records=[
+                    PromptRecord(id="a", prompt="one"),
+                    PromptRecord(id="a", prompt="two"),
+                ],
+                builder=FakeBuilder(),
+                runner=FakeRunner(),
+                available_env=ENV,
+            )
+
+    def test_a_supplied_id_cannot_collide_with_a_derived_one(
+        self, project: Path
+    ) -> None:
+        # Derived ids are prompt-NNNN, so an explicitly supplied "prompt-0001"
+        # collides with whatever position 1 derives.
+        with pytest.raises(ExecutionError, match="duplicate id 'prompt-0001'"):
+            execute(
+                load(project),
+                records=[
+                    PromptRecord(id="prompt-0001", prompt="one"),
+                    PromptRecord(prompt="two"),
+                ],
+                builder=FakeBuilder(),
+                runner=FakeRunner(),
+                available_env=ENV,
+            )
+
+    def test_the_derived_id_reaches_the_per_record_summary(self, project: Path) -> None:
+        # _write_result serializes record.id, so deriving an id somewhere the
+        # record itself never sees would leave `"id": null` on disk while the
+        # directory was named correctly.
+        report = execute(
+            load(project),
+            records=[PromptRecord(prompt="x")],
+            builder=FakeBuilder(),
+            runner=FakeRunner(),
+            available_env=ENV,
+        )
+        summary = json.loads((report.results[0].directory / "result.json").read_text())
+        assert summary["id"] == "prompt-0000"

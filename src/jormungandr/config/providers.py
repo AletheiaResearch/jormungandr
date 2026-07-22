@@ -25,7 +25,7 @@ work for one harness.
 from __future__ import annotations
 
 import re
-from typing import Annotated, Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -118,11 +118,27 @@ class ProviderSpec(BaseModel):
 
     @property
     def env_var(self) -> str:
+        """Name the environment variable the api_key refers to.
+
+        The key is stored as a reference, never a literal, so this is the only
+        thing a config can say about it — the value is resolved inside the
+        container, from ``run.env_files``.
+        """
         match = ENV_REFERENCE.match(self.api_key)
-        assert match is not None  # guaranteed by the validator
+        if match is None:
+            # The validator guarantees this; an assert would vanish under -O.
+            # The value is deliberately not interpolated — this class exists to
+            # keep a leaked key out of error text.
+            raise ValueError("api_key is not an environment reference")
         return match.group(1)
 
     def resolve(self, alias: str) -> str:
+        """Turn a declared alias into the provider's own model id.
+
+        Aliases exist so a config names a model once and every record refers to
+        it by a short name; an unknown one is an error naming what was declared,
+        because the alternative is a provider-side failure mid-run.
+        """
         try:
             return self.models[alias]
         except KeyError:

@@ -29,8 +29,8 @@ from jormungandr.runtime.compose import (
     ComposedLayer,
     compose,
 )
-from jormungandr.runtime.identity import LABEL_NAMESPACE
 from jormungandr.runtime.docker import DockerCli, DockerError
+from jormungandr.runtime.identity import LABEL_NAMESPACE
 from jormungandr.runtime.spec import ImageSpec
 
 __all__ = ["BuildError", "BuildResult", "ImageBuilder", "LayerResult"]
@@ -69,7 +69,9 @@ class BuildError(RuntimeError):
         self.reference = reference
         self.log_path = log_path
         self.detail = detail
-        super().__init__(f"failed to build {reference}: {detail}\nbuild log: {log_path}")
+        super().__init__(
+            f"failed to build {reference}: {detail}\nbuild log: {log_path}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +127,9 @@ class ImageBuilder:
         docker: DockerCli | None = None,
     ) -> None:
         self.state_dir = Path(
-            state_dir if state_dir is not None else Path.home() / ".cache" / "jormungandr"
+            state_dir
+            if state_dir is not None
+            else Path.home() / ".cache" / "jormungandr"
         ).expanduser()
         self.docker = docker or DockerCli()
 

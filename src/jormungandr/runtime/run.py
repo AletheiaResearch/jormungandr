@@ -19,13 +19,17 @@ from __future__ import annotations
 
 import contextlib
 import shutil
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from jormungandr.runtime.container import ContainerRuntime, ContainerSession
 from jormungandr.runtime.docker import CommandResult
-from jormungandr.runtime.invocation import HarnessInvocation, invocation_for
+from jormungandr.runtime.invocation import (
+    HarnessInvocation,
+    Invocation,
+    invocation_for,
+)
 from jormungandr.runtime.spec import ContainerSpec
 
 __all__ = ["HarnessRun", "PromptRunner", "TurnResult"]
@@ -93,7 +97,7 @@ class PromptRunner:
         self.runtime = runtime or ContainerRuntime()
         self.default_timeout = default_timeout
 
-    def run(
+    def run(  # noqa: PLR0913 - fourteen keyword-only arguments; splitting this is a refactor nobody has asked for, so the debt is recorded rather than paid
         self,
         *,
         harness: str,
@@ -128,7 +132,7 @@ class PromptRunner:
             env=dict(env or {}),
             env_files=tuple(env_files),
             mounts=tuple(mounts),
-            network=network,  # type: ignore[arg-type]
+            network=network,
         )
 
         # Harnesses take a system prompt differently: droid has a flag, opencode
@@ -175,7 +179,7 @@ class PromptRunner:
         )
 
     def _exec(
-        self, session: ContainerSession, call, *, timeout: float | None
+        self, session: ContainerSession, call: Invocation, *, timeout: float | None
     ) -> CommandResult:
         """Run one invocation, delivering the prompt on stdin.
 
@@ -191,9 +195,7 @@ class PromptRunner:
         )
 
     @staticmethod
-    def _write_agents_md(
-        session: ContainerSession, workdir: str, system: str
-    ) -> None:
+    def _write_agents_md(session: ContainerSession, workdir: str, system: str) -> None:
         """Deliver a system prompt as AGENTS.md, for harnesses with no flag.
 
         Written inside the container, because the working directory comes from
@@ -230,7 +232,7 @@ class PromptRunner:
         uid is shared.
         """
         destination.mkdir(parents=True, exist_ok=True)
-        home = session.exec(["sh", "-c", "printf %s \"$HOME\""]).stdout.strip() or "/root"
+        home = session.exec(["sh", "-c", 'printf %s "$HOME"']).stdout.strip() or "/root"
         for relative in state_paths:
             source = f"{home}/{relative}"
             target = destination / relative.replace("/", "_")
