@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import os
 import signal
 import socket
@@ -10,6 +11,7 @@ from types import FrameType
 
 import pytest
 
+from jormungandr.runtime import container as container_module
 from jormungandr.runtime.container import (
     DETACHED_OWNER,
     MANAGED_LABEL,
@@ -329,7 +331,10 @@ class TestShutdownRobustness:
 
 
 class TestHandlerLifetime:
-    def test_runtimes_are_not_pinned_by_atexit(self) -> None:
+    def test_runtimes_are_not_pinned_by_atexit(self, restore_signal_handlers) -> None:
+        # The fixture is not decoration: this installs the process-wide
+        # handlers, and without undoing that every later test in the session
+        # finds them already installed and silently exercises nothing.
         import gc
 
         runtime = ContainerRuntime(docker=FakeDocker(), install_handlers=True)
@@ -341,16 +346,21 @@ class TestHandlerLifetime:
 
 @pytest.fixture
 def restore_signal_handlers():
-    """Put SIGINT/SIGTERM back however this process had them.
+    """Put SIGINT/SIGTERM, and the module's own handler state, back.
 
-    Constructing a ``ContainerRuntime`` with ``install_handlers=True`` mutates
-    interpreter-global state that nothing in the class ever undoes, so a test
-    that exercises it has to undo it or every later test inherits the handler.
+    Handlers are installed once per *process*, so a test that installs them
+    leaves the module believing they are already installed and every later test
+    silently gets a no-op. Both halves have to be undone: the interpreter's
+    handlers, and the module-level record of them.
     """
     saved = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
     yield
     for signum, handler in saved.items():
         signal.signal(signum, handler)
+    atexit.unregister(container_module._reap_all)
+    container_module._HANDLERS_INSTALLED = False
+    container_module._HANDLED_SIGNALS.clear()
+    container_module._REAPED_AT_EXIT.clear()
 
 
 # Run out of process because the precondition — an interpreter whose SIGINT
@@ -449,6 +459,89 @@ class TestSignalHandlerRestore:
         assert signal.getsignal(signal.SIGINT) is original
         assert killed == [signal.SIGINT]
 
+    def test_many_runtimes_install_one_handler(
+        self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Handlers used to be installed per runtime, each capturing the
+        # previous one as what it would restore. Five runtimes therefore meant
+        # a five-deep chain and five atexit callbacks, of which four did
+        # nothing — their weakrefs were already dead. Nothing ever uninstalled,
+        # so merely constructing a runtime repointed SIGINT and SIGTERM for the
+        # life of the process.
+        installs: list[int] = []
+        real_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            installs.append(signum)
+            return real_signal(signum, handler)
+
+        monkeypatch.setattr(signal, "signal", recording_signal)
+
+        runtimes = [
+            ContainerRuntime(docker=FakeDocker(), install_handlers=True)
+            for _ in range(5)
+        ]
+
+        assert installs.count(signal.SIGINT) == 1, installs
+        assert installs.count(signal.SIGTERM) == 1, installs
+        assert len(runtimes) == 5
+
+    def test_every_live_runtime_is_reaped_by_one_handler(
+        self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # One handler now has to reap all of them, where previously each
+        # runtime's own handler reaped only itself and relied on the chain.
+        installed: dict[int, object] = {}
+        real_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            installed[signum] = handler
+            return real_signal(signum, handler)
+
+        monkeypatch.setattr(signal, "signal", recording_signal)
+        monkeypatch.setattr(os, "kill", lambda pid, signum: None)
+
+        first, second = FakeDocker(), FakeDocker()
+        runtime_a = ContainerRuntime(docker=first, install_handlers=True)
+        runtime_b = ContainerRuntime(docker=second, install_handlers=True)
+        session_a = runtime_a.create(ContainerSpec(image="img"))
+        session_b = runtime_b.create(ContainerSpec(image="img"))
+
+        installed[signal.SIGINT](signal.SIGINT, None)
+
+        assert first.removed == [session_a.container_id]
+        assert second.removed == [session_b.container_id]
+
+    def test_a_runtime_that_declined_handlers_is_not_reaped(
+        self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # install_handlers=False means "this runtime's lifetime is not tied to
+        # the process" — the detached path relies on it.
+        installed: dict[int, object] = {}
+        real_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            installed[signum] = handler
+            return real_signal(signum, handler)
+
+        monkeypatch.setattr(signal, "signal", recording_signal)
+        monkeypatch.setattr(os, "kill", lambda pid, signum: None)
+
+        handled = FakeDocker()
+        detached = FakeDocker()
+        # Bound to names deliberately: the registry holds runtimes weakly, so
+        # one created as a temporary is collected before the signal arrives and
+        # this would pass for the wrong reason.
+        handled_runtime = ContainerRuntime(docker=handled, install_handlers=True)
+        detached_runtime = ContainerRuntime(docker=detached, install_handlers=False)
+        handled_runtime.create(ContainerSpec(image="img"))
+        detached_runtime.create(ContainerSpec(image="img"))
+
+        installed[signal.SIGINT](signal.SIGINT, None)
+
+        assert handled.removed != []
+        assert detached.removed == []
+
     def test_does_not_handle_a_signal_the_parent_ignored(
         self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -468,9 +561,9 @@ class TestSignalHandlerRestore:
         monkeypatch.setattr(
             signal,
             "getsignal",
-            lambda signum: signal.SIG_IGN
-            if signum == signal.SIGTERM
-            else signal.SIG_DFL,
+            lambda signum: (
+                signal.SIG_IGN if signum == signal.SIGTERM else signal.SIG_DFL
+            ),
         )
         monkeypatch.setattr(signal, "signal", recording_signal)
 

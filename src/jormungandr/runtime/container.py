@@ -184,9 +184,10 @@ class ContainerRuntime:
         # hang whose only escape is SIGKILL — the exact case this class exists
         # to avoid.
         self._lock = threading.RLock()
-        self._handlers_installed = False
         if install_handlers:
-            self._install_handlers()
+            # Weakly held: registering must not be what keeps a runtime alive.
+            _REAPED_AT_EXIT.add(self)
+            _install_process_handlers()
 
     # -- creation ---------------------------------------------------------
 
@@ -382,63 +383,88 @@ class ContainerRuntime:
             with self._lock:
                 self._live.pop(container_id, None)
 
-    def _install_handlers(self) -> None:
-        if self._handlers_installed:
-            return
-        self._handlers_installed = True
 
-        # Weak reference: a bound method handed to atexit (or captured in a
-        # handler closure) keeps the runtime alive for the life of the process.
-        # A library creating runtimes in a loop would otherwise leak every one
-        # of them, along with a signal handler each.
-        ref = weakref.ref(self)
+_REAPED_AT_EXIT: weakref.WeakSet[ContainerRuntime] = weakref.WeakSet()
+"""Runtimes whose containers die with this process.
 
-        def shutdown_if_alive() -> None:
-            runtime = ref()
-            if runtime is not None:
-                runtime.shutdown()
+Weak on purpose: a strong reference here — or a bound method handed to atexit,
+or a runtime captured in a handler closure — would keep every runtime alive for
+the life of the process. A library creating them in a loop would leak all of
+them.
+"""
 
-        atexit.register(shutdown_if_alive)
+_HANDLED_SIGNALS: dict[int, Callable[[int, FrameType | None], Any] | int] = {}
+"""What to restore per signal, and the record that handlers are installed.
 
-        # Exactly what `signal.signal` accepts back, which is what `previous`
-        # exists to hold. `getsignal` also returns None — see below — and that
-        # is normalised away before anything is stored here.
-        previous: dict[int, Callable[[int, FrameType | None], Any] | int] = {}
+Exactly what ``signal.signal`` accepts back. ``getsignal`` also returns None —
+see ``_install_process_handlers`` — and that is normalised away before anything
+is stored here.
+"""
 
-        def handle(signum: int, _frame: FrameType | None) -> None:
-            shutdown_if_alive()
-            # Restore and re-raise so the caller's own handling, and the shell's
-            # view of why we died, both stay correct.
-            signal.signal(signum, previous.get(signum, signal.SIG_DFL))
-            os.kill(os.getpid(), signum)
+_HANDLERS_INSTALLED = False
 
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            with contextlib.suppress(ValueError, OSError):
-                # Only the main thread may install handlers.
-                #
-                # `getsignal` reports None — not SIG_DFL — for a handler Python
-                # did not install, which is what an embedder or a C extension
-                # that called sigaction() before the signal module built its
-                # table leaves behind. Storing that None would put a value
-                # `signal.signal` rejects into `previous`, and `.get`'s default
-                # cannot save us because the key is present: the restore inside
-                # `handle` would raise TypeError, `os.kill` would never run, and
-                # the process would die of an unhandled exception instead of
-                # the signal. Normalise here so `previous` only ever holds
-                # something that can be restored.
-                current = signal.getsignal(signum)
-                if current is signal.SIG_IGN:
-                    # Inherited as ignored, which whoever launched us chose:
-                    # `nohup`, a supervisor, a parent that set it before exec.
-                    # POSIX convention is to leave it alone, and there is a
-                    # concrete failure behind the convention — handling it
-                    # would reap every container on a SIGTERM that was meant to
-                    # be a no-op, then honour the inherited SIG_IGN and keep
-                    # running, leaving a live process with its containers
-                    # silently destroyed.
-                    continue
-                previous[signum] = signal.SIG_DFL if current is None else current
-                signal.signal(signum, handle)
+
+def _reap_all() -> None:
+    """Shut down every runtime still registered and still alive."""
+    # Listed first: shutdown() can drop the last reference to a runtime, and
+    # mutating a WeakSet while iterating it raises.
+    for runtime in list(_REAPED_AT_EXIT):
+        runtime.shutdown()
+
+
+def _install_process_handlers() -> None:
+    """Install the SIGINT/SIGTERM handlers once for the whole process.
+
+    Once, not once per runtime. Installing per runtime meant each new one
+    captured the previous one's handler as what it would restore, so N runtimes
+    built an N-deep chain and N atexit callbacks — and because the closures held
+    weak references, every level but the last did nothing at all. Nothing ever
+    uninstalled either, so merely constructing a runtime repointed the
+    interpreter's SIGINT and SIGTERM for good.
+
+    One handler over a weak registry has neither problem: the set empties itself
+    as runtimes are collected, and the count of handlers does not depend on how
+    many runtimes were ever made.
+    """
+    global _HANDLERS_INSTALLED  # noqa: PLW0603 - signal dispositions are process state; a flag recording that they were set is the same scope as the thing it describes
+    if _HANDLERS_INSTALLED:
+        return
+    _HANDLERS_INSTALLED = True
+
+    atexit.register(_reap_all)
+
+    def handle(signum: int, _frame: FrameType | None) -> None:
+        _reap_all()
+        # Restore and re-raise so the caller's own handling, and the shell's
+        # view of why we died, both stay correct.
+        signal.signal(signum, _HANDLED_SIGNALS.get(signum, signal.SIG_DFL))
+        os.kill(os.getpid(), signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(ValueError, OSError):
+            # Only the main thread may install handlers.
+            #
+            # `getsignal` reports None — not SIG_DFL — for a handler Python did
+            # not install, which is what an embedder or a C extension that
+            # called sigaction() before the signal module built its table leaves
+            # behind. Storing that None would put a value `signal.signal`
+            # rejects into the table, and `.get`'s default cannot save us
+            # because the key is present: the restore inside `handle` would
+            # raise TypeError, `os.kill` would never run, and the process would
+            # die of an unhandled exception instead of the signal. Normalise
+            # here so the table only ever holds something restorable.
+            current = signal.getsignal(signum)
+            if current is signal.SIG_IGN:
+                # Inherited as ignored, which whoever launched us chose:
+                # `nohup`, a supervisor, a parent that set it before exec.
+                # POSIX convention is to leave it alone, and there is a concrete
+                # failure behind the convention — handling it would reap every
+                # container on a SIGTERM that was meant to be a no-op, then
+                # honour the inherited SIG_IGN and keep running, leaving a live
+                # process with its containers silently destroyed.
+                continue
+            _HANDLED_SIGNALS[signum] = signal.SIG_DFL if current is None else current
+            signal.signal(signum, handle)
 
 
 DETACHED_OWNER = "detached"
