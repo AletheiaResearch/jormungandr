@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections import Counter
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -384,6 +385,22 @@ def execute(
     prompts = tuple(
         record.with_id(f"prompt-{index:04d}") for index, record in enumerate(prompts)
     )
+
+    # Also checked before any container starts. An id names a directory, and
+    # _run_one rmtree's that directory before writing into it, so two records
+    # sharing one id means the second silently destroys the first's output
+    # while the report calls both of them successful. load_prompts guards a
+    # file; this guards `records=`, which does not go through it — and it has
+    # to run after ids are derived, because a supplied "prompt-0001" can
+    # collide with one derived from position.
+    counts = Counter(str(r.id) for r in prompts)
+    duplicated = sorted(name for name, count in counts.items() if count > 1)
+    if duplicated:
+        listed = ", ".join(repr(name) for name in duplicated)
+        raise ExecutionError(
+            f"duplicate id {listed}. Ids name output directories, so they "
+            "must be unique."
+        )
 
     # Checked before any container starts: a record named "report.json" would
     # otherwise collide with the run report and fail after every record had

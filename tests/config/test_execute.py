@@ -734,6 +734,41 @@ class TestRecordsWithoutIds:
         )
         assert [r.id for r in report.results] == ["prompt-0000", "mine"]
 
+    def test_duplicate_ids_are_refused(self, project: Path) -> None:
+        # Ids name output directories, and _run_one rmtree's the directory
+        # before writing. Two records sharing an id therefore share one
+        # directory and the second destroys the first's output — silently,
+        # with both reported as succeeded. load_prompts already guards this;
+        # execute() did not, so passing records= bypassed the guard.
+        with pytest.raises(ExecutionError, match="duplicate id 'a'"):
+            execute(
+                load(project),
+                records=[
+                    PromptRecord(id="a", prompt="one"),
+                    PromptRecord(id="a", prompt="two"),
+                ],
+                builder=FakeBuilder(),
+                runner=FakeRunner(),
+                available_env=ENV,
+            )
+
+    def test_a_supplied_id_cannot_collide_with_a_derived_one(
+        self, project: Path
+    ) -> None:
+        # Derived ids are prompt-NNNN, so an explicitly supplied "prompt-0001"
+        # collides with whatever position 1 derives.
+        with pytest.raises(ExecutionError, match="duplicate id 'prompt-0001'"):
+            execute(
+                load(project),
+                records=[
+                    PromptRecord(id="prompt-0001", prompt="one"),
+                    PromptRecord(prompt="two"),
+                ],
+                builder=FakeBuilder(),
+                runner=FakeRunner(),
+                available_env=ENV,
+            )
+
     def test_the_derived_id_reaches_the_per_record_summary(self, project: Path) -> None:
         # _write_result serializes record.id, so deriving an id somewhere the
         # record itself never sees would leave `"id": null` on disk while the
