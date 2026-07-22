@@ -159,6 +159,7 @@ commands =
       --cov=jormungandr --cov-branch \
       --cov-report=xml --cov-report=html \
       --cov-report term-missing:skip-covered \
+      --junitxml=junit.xml -o junit_family=legacy \
       {posargs:tests}
 dependency_groups = test
 
@@ -201,9 +202,70 @@ Coverage measures `--cov=jormungandr` (the installed package) rather than
 against an unmeasured baseline would either be meaningless or immediately
 block; setting one is its own decision, once a number exists.
 
-And `.github/workflows/check.yml`, mirroring the reference project: `setup-uv`,
-then `uv tool install --python-preference only-managed --python 3.14 tox --with
-tox-uv --with tox-gh`, then bare `tox`.
+And `.github/workflows/check.yml`:
+
+```yaml
+name: Run Checks and Tests
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tox:
+    runs-on: ubuntu-latest
+    name: Tox
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+      - name: Install tox
+        run: uv tool install --python-preference only-managed --python 3.14 tox --with tox-uv --with tox-gh
+      - name: Run Tox
+        run: tox
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: AletheiaResearch/jormungandr
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: AletheiaResearch/jormungandr
+```
+
+Three deliberate departures from the reference workflow:
+
+- **`ubuntu-latest` with `setup-uv`'s own cache**, not Namespace runners with
+  `nscloud-cache-action`. AletheiaResearch is not on that Namespace org, and a
+  workflow naming a runner profile that does not exist never starts.
+- **`pull_request` as well as `push`.** A gate that does not run on a pull
+  request is not a gate. `concurrency` with `cancel-in-progress` stops a pushed
+  PR branch from running the job twice.
+- **No `env: TOX_RUNNER: "virtualenv"`.** The reference sets it, which bypasses
+  `uv-venv-lock-runner` — plausibly to cooperate with the Namespace cache.
+  Since that cache is not in use here, CI keeps the lock runner and therefore
+  the `--locked` enforcement that is half the argument for tox. The
+  `{env:TOX_RUNNER:…}` indirection stays in `tox.ini` so it remains overridable
+  without editing config.
+
+`--junitxml=junit.xml -o junit_family=legacy` in the base testenv is not
+optional decoration: it is the input `codecov/test-results-action` consumes.
+`--cov-report=xml` likewise feeds `codecov-action`.
+
+Codecov requires `AletheiaResearch/jormungandr` to be onboarded with a
+`CODECOV_TOKEN` repository secret. That is already in place.
+
+The README gains the coverage badge, as the reference repo has on line 1.
 
 ### Why each ignore earns its line
 
@@ -263,7 +325,7 @@ defect before fixing it.
 
 | # | Commit | Notes |
 | --- | --- | --- |
-| 1 | `chore: ignore tool cache directories` | `.ruff_cache/`, `.mypy_cache/`, `.pytest_cache/`. All three are untracked *and* unignored today, and CLAUDE.md records `git add -A` having twice swept unrelated work into a commit. |
+| 1 | `chore: ignore tool caches and coverage artifacts` | `.ruff_cache/`, `.mypy_cache/`, `.pytest_cache/`, `.tox/`, plus `.coverage`, `coverage.xml`, `htmlcov/`, `junit.xml`. The first four are untracked *and* unignored today; the rest arrive with step 15. CLAUDE.md records `git add -A` having twice swept unrelated work into a commit. |
 | 2 | `fix(execute): pass -- to git ls-remote and validate clone_url` | test first |
 | 3 | `fix(execute): assign record ids before use` | test first |
 | 4 | `fix(runtime): restore signal handlers Python did not install` | test first |
@@ -278,8 +340,8 @@ defect before fixing it.
 | 13 | `build!: require Python 3.14` | `requires-python`, `.python-version`, relock. Breaking, hence `!` |
 | 14 | `build: add ruff and mypy configuration` | lands green |
 | 15 | `build: run the gates under tox` | `tox.ini`, `test`/`lint`/`type` dependency groups, `pytest-cov` |
-| 16 | `ci: run tox on push and pull request` | `.github/workflows/check.yml`; makes `[gh.python]` live |
-| 17 | `docs: record the tox commands in CLAUDE.md` | |
+| 16 | `ci: run tox on push and pull request` | `.github/workflows/check.yml` with both Codecov uploads; makes `[gh.python]` live |
+| 17 | `docs: add the coverage badge and record the tox commands` | README badge, CLAUDE.md commands |
 
 ### Task 12 is smaller than it looked
 
