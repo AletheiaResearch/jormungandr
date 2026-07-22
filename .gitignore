@@ -12,6 +12,10 @@ coverage.xml
 htmlcov/
 junit.xml
 
+# Nested git worktrees. Scoped to worktrees/ rather than all of .claude/, so
+# shared config under .claude/ can still be committed.
+.claude/worktrees/
+
 .vscode/
 
 .DS_Store
