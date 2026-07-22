@@ -409,7 +409,19 @@ class ContainerRuntime:
         for signum in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(ValueError, OSError):
                 # Only the main thread may install handlers.
-                previous[signum] = signal.getsignal(signum)
+                #
+                # `getsignal` reports None — not SIG_DFL — for a handler Python
+                # did not install, which is what an embedder or a C extension
+                # that called sigaction() before the signal module built its
+                # table leaves behind. Storing that None would put a value
+                # `signal.signal` rejects into `previous`, and `.get`'s default
+                # cannot save us because the key is present: the restore inside
+                # `handle` would raise TypeError, `os.kill` would never run, and
+                # the process would die of an unhandled exception instead of
+                # the signal. Normalise here so `previous` only ever holds
+                # something that can be restored.
+                current = signal.getsignal(signum)
+                previous[signum] = signal.SIG_DFL if current is None else current
                 signal.signal(signum, handle)
 
 

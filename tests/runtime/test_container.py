@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import os
+import signal
 import socket
+import subprocess
+import sys
 import weakref
+from types import FrameType
 
 import pytest
 
@@ -317,3 +321,139 @@ class TestHandlerLifetime:
         del runtime
         gc.collect()
         assert ref() is None, "atexit/handler closure kept the runtime alive"
+
+
+@pytest.fixture
+def restore_signal_handlers():
+    """Put SIGINT/SIGTERM back however this process had them.
+
+    Constructing a ``ContainerRuntime`` with ``install_handlers=True`` mutates
+    interpreter-global state that nothing in the class ever undoes, so a test
+    that exercises it has to undo it or every later test inherits the handler.
+    """
+    saved = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+    yield
+    for signum, handler in saved.items():
+        signal.signal(signum, handler)
+
+
+# Run out of process because the precondition — an interpreter whose SIGINT
+# handler Python did not install — is built by rebuilding the signal module's
+# handler table, which is not something to do inside a pytest process.
+_EMBEDDED_INTERPRETER_REPRO = """
+import os, signal, sys
+
+# `signal_exec` records None for any signal whose OS-level disposition is
+# neither SIG_DFL nor SIG_IGN when the table is built. Re-running it while
+# CPython's own C trampoline is installed for SIGINT reproduces exactly the
+# state an embedder leaves behind (uwsgi, mod_wsgi, gdb, a pyo3/pybind11 host
+# that called sigaction() before the signal module was first imported).
+del sys.modules["signal"]
+del sys.modules["_signal"]
+import signal
+
+if signal.getsignal(signal.SIGINT) is not None:
+    sys.exit("precondition failed: getsignal(SIGINT) did not report None")
+
+from jormungandr.runtime.container import ContainerRuntime
+
+class NoDocker:
+    def require(self):
+        raise AssertionError("the daemon must not be touched")
+
+ContainerRuntime(docker=NoDocker(), install_handlers=True)
+os.kill(os.getpid(), signal.SIGINT)
+sys.exit("still alive: the handler never re-raised the signal")
+"""
+
+
+class TestSignalHandlerRestore:
+    def test_dies_of_the_signal_when_python_did_not_install_the_handler(self) -> None:
+        # The whole point of the handler is that the shell still sees the real
+        # cause of death. Restoring `None` raises TypeError before `os.kill`
+        # is reached, so the process exits 1 with a traceback instead.
+        result = subprocess.run(
+            [sys.executable, "-c", _EMBEDDED_INTERPRETER_REPRO],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert "TypeError" not in result.stderr, result.stderr
+        assert result.returncode == -signal.SIGINT, (result.returncode, result.stderr)
+
+    def test_restores_sig_dfl_for_a_handler_python_did_not_install(
+        self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `getsignal` stores None rather than omitting the signal, so the key
+        # is present and `.get(signum, SIG_DFL)` never reaches its default.
+        installed: dict[int, object] = {}
+        real_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            installed[signum] = handler
+            return real_signal(signum, handler)
+
+        monkeypatch.setattr(signal, "getsignal", lambda signum: None)
+        monkeypatch.setattr(signal, "signal", recording_signal)
+        killed: list[int] = []
+        monkeypatch.setattr(os, "kill", lambda pid, signum: killed.append(signum))
+
+        ContainerRuntime(docker=FakeDocker(), install_handlers=True)
+        handle = installed[signal.SIGINT]
+        assert callable(handle)
+
+        handle(signal.SIGINT, None)
+
+        assert installed[signal.SIGINT] is signal.SIG_DFL
+        assert killed == [signal.SIGINT], "handler aborted before re-raising"
+
+    def test_restores_the_handler_python_did_install(
+        self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Guards against "fixing" the None case by always restoring SIG_DFL.
+        def original(signum: int, frame: FrameType | None) -> None:
+            raise AssertionError("not reached")
+
+        signal.signal(signal.SIGINT, original)
+        installed: dict[int, object] = {}
+        real_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            installed[signum] = handler
+            return real_signal(signum, handler)
+
+        monkeypatch.setattr(signal, "signal", recording_signal)
+        killed: list[int] = []
+        monkeypatch.setattr(os, "kill", lambda pid, signum: killed.append(signum))
+
+        ContainerRuntime(docker=FakeDocker(), install_handlers=True)
+        installed[signal.SIGINT](signal.SIGINT, None)
+
+        assert signal.getsignal(signal.SIGINT) is original
+        assert killed == [signal.SIGINT]
+
+    def test_reaps_containers_before_re_raising(
+        self, restore_signal_handlers, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Reaping happens before the restore, so the TypeError does not cost
+        # the containers today — but it still escapes the handler. This pins
+        # the ordering the fix must not disturb.
+        installed: dict[int, object] = {}
+        real_signal = signal.signal
+
+        def recording_signal(signum, handler):
+            installed[signum] = handler
+            return real_signal(signum, handler)
+
+        monkeypatch.setattr(signal, "getsignal", lambda signum: None)
+        monkeypatch.setattr(signal, "signal", recording_signal)
+        monkeypatch.setattr(os, "kill", lambda pid, signum: None)
+
+        docker = FakeDocker()
+        runtime = ContainerRuntime(docker=docker, install_handlers=True)
+        session = runtime.create(ContainerSpec(image="img"))
+
+        installed[signal.SIGINT](signal.SIGINT, None)
+
+        assert docker.removed == [session.container_id]
