@@ -111,7 +111,12 @@ def resolve_commit(clone_url: str, ref: str | None) -> str:
     target = ref or "HEAD"
     try:
         proc = subprocess.run(
-            ["git", "ls-remote", clone_url, target],
+            # `--` is load-bearing: both operands come from prompts.jsonl, and
+            # without it a clone_url of `--upload-pack=<cmd>` is parsed as an
+            # option rather than a repository — which runs <cmd> on this host.
+            # GitSource rejects such a url too; this is the half that does not
+            # depend on the value having gone through the model.
+            ["git", "ls-remote", "--", clone_url, target],
             capture_output=True,
             text=True,
             timeout=120,

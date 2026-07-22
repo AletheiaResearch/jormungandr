@@ -47,6 +47,28 @@ single safe path component. Without this an id of ``../../x`` escapes that
 directory — and since the workspace is cleared with ``rmtree`` before each run,
 that is arbitrary deletion driven by a data file."""
 
+CLONE_URL = re.compile(
+    r"^(?:(?:https?|ssh|git)://|[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:)"
+    r"[A-Za-z0-9._:/@%+=-]+$"
+)
+"""A clone url reaches two places that treat a bare string as code.
+
+``resolve_commit`` passes it to ``git ls-remote`` as a positional argument, so
+a value beginning with ``-`` is an *option* — and ``--upload-pack=<cmd>`` runs
+``<cmd>`` on this host. ``compose_workspace`` interpolates it, unquoted, into a
+``RUN git remote add origin <url>`` line, so ``;``, ``&&``, backticks and
+``$( )`` run as root inside the build. Both call sites are hardened
+independently, but a prompts.jsonl is data and the string should never have got
+that far.
+
+Hence an allowlist rather than a denylist: a scheme git can actually fetch
+(``http``, ``https``, ``ssh``, ``git``) or scp-like ``user@host:path``,
+followed only by characters that are inert to a shell. Deliberately excluded:
+``ext::``, which is a transport whose entire purpose is running a command;
+``file://`` and bare local paths, which have been meaningless since the clone
+moved inside the image; and ``?``, ``~``, ``!`` and ``#``, which no real remote
+needs and every shell treats specially."""
+
 
 def _safe_relative(value: str | None, *, field: str) -> str | None:
     """Normalize a path that will be joined below the workspace directory.
@@ -90,7 +112,11 @@ class GitSource(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     clone_url: str = Field(min_length=1)
-    """Any git URL — https, ssh, or a local path."""
+    """A git URL: ``http(s)://``, ``ssh://``, ``git://``, or ``user@host:path``.
+
+    Not a host path. The clone happens inside the workspace image, so a host
+    path would resolve against the build container's filesystem and find
+    nothing."""
 
     ref: str | None = None
     """Branch, tag or commit. Unset means the default branch, which makes the
@@ -112,6 +138,23 @@ class GitSource(BaseModel):
     should sit alongside other material, or when a stable name matters more
     than the repository's own.
     """
+
+    @field_validator("clone_url")
+    @classmethod
+    def _validate_clone_url(cls, value: str) -> str:
+        """Refuse anything that is not a fetchable, shell-inert git url.
+
+        Checked here so a bad line is named at load time — ``load_prompts``
+        reports ``line N`` — rather than reaching ``git ls-remote`` inside a
+        worker thread, where the same string is an argument vector.
+        """
+        cleaned = value.strip()
+        if not CLONE_URL.fullmatch(cleaned):
+            raise ValueError(
+                f"clone_url must be an http(s), ssh or git url, or "
+                f"user@host:path; got {value!r}"
+            )
+        return cleaned
 
     @field_validator("subdirectory", "clone_as")
     @classmethod

@@ -466,6 +466,12 @@ class TestTeichFormatCompatibility:
         assert invocation_for("opencode").system_via == "agents_md"
 
 
+# Real urls, not placeholders: clone_url is validated, because it reaches
+# `git ls-remote` as an argument vector and a `RUN` line as shell text.
+URL = "https://git.example.com/team/mono.git"
+OTHER_URL = "https://git.example.com/team/other.git"
+
+
 class TestGitSource:
     """The richer form: everything github_repo cannot express."""
 
@@ -495,9 +501,9 @@ class TestGitSource:
 
     def test_a_subtree_has_no_history(self) -> None:
         # Inherent to taking a subtree, not an implementation limit.
-        whole = PromptRecord(prompt="x", git={"clone_url": "u"}).workspace.git
+        whole = PromptRecord(prompt="x", git={"clone_url": URL}).workspace.git
         part = PromptRecord(
-            prompt="x", git={"clone_url": "u", "subdirectory": "pkg"}
+            prompt="x", git={"clone_url": URL, "subdirectory": "pkg"}
         ).workspace.git
         assert whole.has_history and not part.has_history
 
@@ -505,14 +511,14 @@ class TestGitSource:
         # They describe the same thing at different detail levels; accepting
         # both would mean silently picking a winner.
         with pytest.raises(ValidationError, match="only one workspace source"):
-            PromptRecord(prompt="x", github_repo="a/b", git={"clone_url": "u"})
+            PromptRecord(prompt="x", github_repo="a/b", git={"clone_url": URL})
 
     def test_git_and_an_explicit_workspace_are_exclusive(self) -> None:
         with pytest.raises(ValidationError, match="only one workspace source"):
             PromptRecord(
                 prompt="x",
-                git={"clone_url": "u"},
-                workspace={"type": "git", "git": {"clone_url": "other"}},
+                git={"clone_url": URL},
+                workspace={"type": "git", "git": {"clone_url": OTHER_URL}},
             )
 
     def test_github_repo_and_an_explicit_workspace_are_exclusive(self) -> None:
@@ -520,7 +526,7 @@ class TestGitSource:
             PromptRecord(
                 prompt="x",
                 github_repo="a/b",
-                workspace={"type": "git", "git": {"clone_url": "other"}},
+                workspace={"type": "git", "git": {"clone_url": OTHER_URL}},
             )
 
     def test_an_explicit_none_workspace_is_not_a_conflict(self) -> None:
@@ -532,21 +538,64 @@ class TestGitSource:
         # A prompt file is data; it must not be able to write outside the run's
         # output directory. `..` is the only segment that can actually escape.
         with pytest.raises(ValidationError, match=r"\.\."):
-            PromptRecord(prompt="x", git={"clone_url": "u", "subdirectory": bad})
+            PromptRecord(prompt="x", git={"clone_url": URL, "subdirectory": bad})
         with pytest.raises(ValidationError, match=r"\.\."):
-            PromptRecord(prompt="x", git={"clone_url": "u", "clone_as": bad})
+            PromptRecord(prompt="x", git={"clone_url": URL, "clone_as": bad})
 
     def test_surrounding_slashes_are_trimmed_not_rejected(self) -> None:
         # These are always joined below the workspace root, so a leading slash
         # is sloppiness rather than an absolute path.
         record = PromptRecord(
-            prompt="x", git={"clone_url": "u", "subdirectory": "/pkg/api/"}
+            prompt="x", git={"clone_url": URL, "subdirectory": "/pkg/api/"}
         )
         assert record.workspace.git.subdirectory == "pkg/api"
 
     def test_unknown_git_key_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            PromptRecord(prompt="x", git={"clone_url": "u", "branch": "main"})
+            PromptRecord(prompt="x", git={"clone_url": URL, "branch": "main"})
+
+    @pytest.mark.parametrize(
+        "good",
+        [
+            "https://github.com/acme/app",
+            "https://github.com/acme/app.git",
+            "http://git.internal/acme/app.git",
+            "git://git.kernel.org/pub/scm/git/git.git",
+            "ssh://git@git.example.com:2222/team/mono.git",
+            "git@git.example.com:team/mono.git",
+            "https://user:token@git.example.com/team/mono.git",
+        ],
+    )
+    def test_real_git_urls_are_accepted(self, good: str) -> None:
+        record = PromptRecord(prompt="x", git={"clone_url": good})
+        assert record.workspace.git.clone_url == good
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            # An argument beginning with a dash is an *option* to every git
+            # subcommand, and `--upload-pack=<cmd>` executes <cmd>.
+            "--upload-pack=touch /tmp/pwned",
+            "-u/bin/sh",
+            # `ext::` is a transport that runs a command by design.
+            "ext::sh -c 'touch /tmp/pwned'",
+            # clone_url is interpolated unquoted into a `RUN git remote add
+            # origin <url>` line in the workspace Dockerfile.
+            "https://h/r; touch /tmp/pwned",
+            "https://h/r && touch /tmp/pwned",
+            "https://h/r$(touch /tmp/pwned)",
+            "https://h/r`touch /tmp/pwned`",
+            # No scheme at all: not a git url, and previously accepted.
+            "u",
+            "/etc/passwd",
+            "file:///etc",
+        ],
+    )
+    def test_a_clone_url_that_is_not_a_git_url_is_rejected(self, bad: str) -> None:
+        # A prompts.jsonl is data. Rejecting here names the offending line at
+        # load time instead of handing the string to `git` inside a worker.
+        with pytest.raises(ValidationError, match="clone_url"):
+            PromptRecord(prompt="x", git={"clone_url": bad})
 
 
 class TestRecordIdSafety:

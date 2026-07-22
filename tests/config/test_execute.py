@@ -412,6 +412,31 @@ class TestRefResolution:
         with pytest.raises(ExecutionError, match="could not resolve|timed out"):
             resolve_commit("https://github.invalid/nope/nope", "main")
 
+    def test_a_clone_url_cannot_become_a_git_option(self, tmp_path: Path) -> None:
+        # `git ls-remote <url> <ref>` with no `--` lets a url beginning with a
+        # dash be parsed as an option, and `--upload-pack=<cmd>` executes <cmd>
+        # on the host. clone_url comes straight out of prompts.jsonl.
+        #
+        # The assertion is the side effect, not the message: git exits non-zero
+        # either way, so only the absence of the file proves nothing ran.
+        from jormungandr.execute import ExecutionError, resolve_commit
+
+        sentinel = tmp_path / "pwned.txt"
+        # `sh -c '...'` rather than a bare `touch`: git appends the repository
+        # name to the upload-pack command, so a bare touch also creates a file
+        # called HEAD in the working directory. Here it lands harmlessly in $0.
+        payload = f"--upload-pack=sh -c 'touch {sentinel}'"
+        resolve_commit.cache_clear()
+        try:
+            with pytest.raises(ExecutionError):
+                resolve_commit(payload, None)
+        finally:
+            resolve_commit.cache_clear()
+
+        assert not sentinel.exists(), (
+            f"git executed the injected command: {sentinel} was created"
+        )
+
 
 class TestReviewRegressions:
     """Each of these reproduces a defect found by adversarial review."""
