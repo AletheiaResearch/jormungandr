@@ -68,6 +68,28 @@ outright — see the last step of the sequence.
 
 ### What is deliberately not adopted
 
+**mypy over `tests/`.** Decided, not deferred: the type gate covers `src` only.
+
+Measured before deciding — 238 errors strict, 111 behind an override relaxing
+`disallow_untyped_defs`, `disallow_untyped_calls` and
+`disallow_incomplete_defs`. The count was never the point. **57 of the 111 are
+a single shape**: `FakeRunner` is not a `PromptRunner`, `FakeDocker` is not a
+`DockerCli`, `FakeRuntime` is not a `ContainerRuntime`, because the fakes are
+duck-typed while the constructors ask for concrete classes. About 24 more are
+tests reaching through an `X | None` they know is set. Nothing sampled was a
+real defect, so the work would buy annotations rather than correctness.
+
+If this is ever revisited, two traps are already mapped. The obvious override
+matches nothing: `tests/` has no `__init__.py`, so mypy names those modules by
+basename — `test_config`, not `tests.config.test_config` — and neither
+`module = "tests.*"` nor `module = "test_*"` matches, the latter because mypy
+requires `*` to occupy a whole component. It fails *silently*, reporting the
+full strict count as though the override were working. And the change actually
+worth making is not in the tests at all: declaring Protocols for those three
+injected collaborators would make the fakes officially substitutable instead of
+accidentally so, and delete most of the 111 at once. That is a production
+design decision, to be taken on its own merits.
+
 **flake8 and flake8-pydantic.** Measured return is 4 findings, all `PYD003`,
 all in `runtime/spec.py`, and arguably 0 actionable — lines 69/70/72 sit in a
 block whose neighbours *must* use `Field(...)` because they carry `gt=0`, so
@@ -486,61 +508,33 @@ docker images --filter 'label=dev.jormungandr.managed=true' -q | wc -l
 docker ps -a --filter 'label=dev.jormungandr.session' -q | wc -l
 ```
 
+## Three further defects, found here and since fixed
+
+These were reproduced while verifying the three the gates exposed, and were
+initially recorded as out of scope. They were subsequently fixed once it was
+established that the project has no users yet and a breaking change is cheap.
+Each got its own commit and its own test.
+
+- **`ContainerRuntime` never uninstalled its signal handlers.** Five runtimes
+  left five `atexit` callbacks and a five-deep handler chain, of which four
+  levels did nothing — their weakrefs were already dead. Merely *constructing*
+  one repointed the interpreter's SIGINT and SIGTERM for good. Fixed by
+  installing one handler per process over a weakly-held registry, rather than
+  adding an uninstall API a caller must remember: the defect was that
+  construction alone leaked, which an opt-in teardown does not address.
+- **An inherited `SIG_IGN` was overridden.** Under `nohup` or a supervisor, a
+  SIGTERM that was a no-op tore down every container, then honoured the
+  inherited `SIG_IGN` and kept running — a live process with its containers
+  silently gone. Fixed with the POSIX guard.
+- **Duplicate record ids were unchecked in `execute(records=...)`.** Two records
+  sharing an id shared one output directory, and the `rmtree` in `_run_one`
+  meant the second destroyed the first's output while the report called both
+  successful. `load_prompts` guards a file; `records=` never went through it.
+  Fixed after ids are derived, because a supplied `prompt-0001` can collide
+  with one derived from position.
+
 ## Deferred
 
-Three further defects were found and reproduced while verifying the three
-above. None is in scope here — each is its own concern with its own failure
-mode, and CLAUDE.md is explicit about not widening a change to sweep them in.
-They are recorded so they are not lost.
-
-- **`ContainerRuntime` never uninstalls its signal handlers.** Measured: five
-  runtimes constructed and garbage-collected leave five `atexit` callbacks and
-  a five-deep handler chain, of which four levels do nothing — their weakrefs
-  are dead. `_install_handlers` has no inverse, the class is not a context
-  manager, and merely *constructing* one permanently repoints the interpreter's
-  SIGINT and SIGTERM. Bounded today (the CLI builds one per run) but a real
-  library-use defect. It also leaks into the pytest process via
-  `tests/runtime/test_container.py:315`.
-- **An inherited `SIG_IGN` is overridden.** Launched under `nohup` or a
-  supervisor that ignores SIGTERM, a SIGTERM now tears down every container,
-  then correctly honours the inherited `SIG_IGN` and does *not* kill the
-  process — which keeps running with its containers silently gone. POSIX
-  convention is not to handle a signal inherited as `SIG_IGN`. One-line guard.
-- **Duplicate record ids are unchecked in `execute(records=...)`.** Two records
-  sharing an id silently share one output directory, and the `shutil.rmtree` at
-  `execute.py:261` means one clobbers the other. `load_prompts` guards this
-  (`config/prompts.py:339-343`); `execute()` does not. Pre-existing, and step 3
-  does not introduce it — but step 3's derived `prompt-NNNN` ids can now
-  collide with an explicitly supplied one.
-
-- **mypy over `tests/`.** Measured rather than estimated, after the defect
-  fixes landed: **238 errors** strict, **111** behind an override disabling
-  `disallow_untyped_defs`, `disallow_untyped_calls` and
-  `disallow_incomplete_defs`.
-
-  Two things to know before attempting it.
-
-  First, the obvious override does not work. `tests/` has no `__init__.py`, so
-  mypy names those modules by basename — `test_config`, not
-  `tests.config.test_config` — and a `module = "tests.*"` pattern silently
-  matches nothing. `module = "test_*"` does not work either: mypy requires `*`
-  to occupy a whole component. The options are listing the module names
-  explicitly, or making `tests/` a package, which changes how pytest imports
-  them.
-
-  Second, and more important: **the 111 are not a backlog of small fixes.**
-  57 of them are one shape — `FakeRunner` is not a `PromptRunner`, `FakeDocker`
-  is not a `DockerCli`, `FakeRuntime` is not a `ContainerRuntime` — because the
-  fakes are duck-typed while the constructors ask for concrete classes. About
-  24 more are tests reaching through an `X | None` they know is set. None of
-  the sampled findings is a real defect.
-
-  So the useful version of this work is not annotating tests. It is declaring
-  Protocols for the three injected collaborators, which would make the fakes
-  officially substitutable instead of accidentally so and delete most of the
-  111 at once. That is a design change to production code, and it should be
-  decided on its own merits rather than as a side effect of turning on a
-  checker.
 - **A coverage threshold.** `pytest-cov` reports; nothing fails on a number.
   Setting `fail_under` against a baseline nobody has measured would either be
   meaningless or block immediately. Pick one once a real figure exists.
