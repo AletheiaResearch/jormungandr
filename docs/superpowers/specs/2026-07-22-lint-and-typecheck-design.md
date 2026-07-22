@@ -513,12 +513,34 @@ They are recorded so they are not lost.
   does not introduce it — but step 3's derived `prompt-NNNN` ids can now
   collide with an explicitly supplied one.
 
-- **mypy over `tests/`.** Strict on `src` is 33 errors; adding `tests/` is
-  +256. Doing both in one change guarantees blanket `# type: ignore`. Worth
-  doing later behind `[[tool.mypy.overrides]]` with `disallow_untyped_defs` and
-  `disallow_untyped_calls` disabled, which is the setting that surfaces the
-  useful signal — whether the fakes have drifted from the real signatures — at
-  around 110–150 errors rather than 256.
+- **mypy over `tests/`.** Measured rather than estimated, after the defect
+  fixes landed: **238 errors** strict, **111** behind an override disabling
+  `disallow_untyped_defs`, `disallow_untyped_calls` and
+  `disallow_incomplete_defs`.
+
+  Two things to know before attempting it.
+
+  First, the obvious override does not work. `tests/` has no `__init__.py`, so
+  mypy names those modules by basename — `test_config`, not
+  `tests.config.test_config` — and a `module = "tests.*"` pattern silently
+  matches nothing. `module = "test_*"` does not work either: mypy requires `*`
+  to occupy a whole component. The options are listing the module names
+  explicitly, or making `tests/` a package, which changes how pytest imports
+  them.
+
+  Second, and more important: **the 111 are not a backlog of small fixes.**
+  57 of them are one shape — `FakeRunner` is not a `PromptRunner`, `FakeDocker`
+  is not a `DockerCli`, `FakeRuntime` is not a `ContainerRuntime` — because the
+  fakes are duck-typed while the constructors ask for concrete classes. About
+  24 more are tests reaching through an `X | None` they know is set. None of
+  the sampled findings is a real defect.
+
+  So the useful version of this work is not annotating tests. It is declaring
+  Protocols for the three injected collaborators, which would make the fakes
+  officially substitutable instead of accidentally so and delete most of the
+  111 at once. That is a design change to production code, and it should be
+  decided on its own merits rather than as a side effect of turning on a
+  checker.
 - **A coverage threshold.** `pytest-cov` reports; nothing fails on a number.
   Setting `fail_under` against a baseline nobody has measured would either be
   meaningless or block immediately. Pick one once a real figure exists.
